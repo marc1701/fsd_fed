@@ -4,7 +4,7 @@ import os, glob
 import torch, torchaudio
 from torch.utils.data import Dataset, DataLoader, IterableDataset
 import seaborn as sns; sns.set()
-
+from metrics_plots import *
 
 
 class FSD_CRNN(nn.Module):
@@ -83,6 +83,7 @@ class FSD50k_MelSpec1s(Dataset):
         vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
         self.labels = vocab[1]
         self.mids = vocab[2]
+        self.len_vocab = len(vocab)
 
     def __len__(self): return len(self.file_list)
 
@@ -97,14 +98,14 @@ class FSD50k_MelSpec1s(Dataset):
         csv_index = np.where(self.info['fname'] == clip_index)[0][0]
 
         # set up array of zeros for binarised output
-        y = torch.zeros((len(vocab)), dtype=torch.bool)
+        y = torch.zeros(self.len_vocab)
 
         # get m_ids from metadata as python list
         tags = self.info.iloc[csv_index]['mids'].split(',')
 
         # binarised indication of tags
         for tag in tags:
-            y[np.where(self.mids == tag)[0][0]] = True
+            y[np.where(self.mids == tag)[0][0]] = 1
 
         # probably no transforms (data already processed) but good to include
         if self.transforms is not None:
