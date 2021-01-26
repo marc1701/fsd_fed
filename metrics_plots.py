@@ -1,3 +1,6 @@
+from pytorch_lightning.metrics.functional import precision_recall_curve, auc
+from matplotlib import pyplot as plt
+
 def pr_auc(y_pred, y_true):
     precision, recall, _ = precision_recall_curve(y_pred, y_true, pos_label=1)
     return auc(recall, precision)
