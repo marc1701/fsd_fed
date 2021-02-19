@@ -1,9 +1,13 @@
 import numpy as np, pandas as pd
 import matplotlib.pyplot as plt
-import os, glob
+import os, glob, datetime
 import torch, torchaudio
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, IterableDataset
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+from pytorchtools import EarlyStopping
+
 import seaborn as sns; sns.set()
 from metrics_plots import *
 
@@ -140,15 +144,41 @@ class FSD50k_MelSpec1s(Dataset):
     96-band mel-spectrogram representation'''
 
     def __init__(self, transforms=None, split='train',
+                 uploader_min=0,
                  anno_dir='FSD50K.ground_truth/'):
 
         self.transforms = transforms
 
-        data_path = 'FSD50k_' + split + '_1sec_segs'
+        data_path = 'FSD50k_' + split + '_1sec_segs/'
 
         self.info = pd.read_csv(anno_dir + split + '.csv')
-
-        self.file_list = glob.glob(data_path + '/*')
+        if uploader_min: # if user has set a value for minimum clips
+            uploaders = (
+                self.info.uploader.value_counts() >= uploader_min).to_dict()
+            uploaders = [name for name in uploaders.keys() if uploaders[name]]
+            # remove all uploaders that do not meet the minimum clip threshold
+            self.info = self.info[self.info.uploader.isin(uploaders)]
+        
+#         if uploader_min > 0:
+#             # make a file list using only those uploaders selected
+#             self.file_list = []
+#             for n in range(len(self.info)):
+#                 self.file_list.append(
+#                     glob.glob(data_path + str(self.info.fname[n]) + '*'))
+#         else:
+#             # all files
+#             self.file_list = glob.glob(data_path + '/*')
+            
+            
+        # this method of making a file list is much faster and should work
+        # regardless of whether full set or subset is used
+        self.file_list = []
+        for fname in self.info.fname:
+            n_segs = int(self.info[self.info.fname==fname].n_segs)
+            
+            for n in range(n_segs):
+                filepath = data_path + str(fname) + '.' + str(n) + '.pt'
+                self.file_list.append(filepath)
 
         vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
         self.labels = vocab[1]
@@ -170,9 +200,12 @@ class FSD50k_MelSpec1s(Dataset):
             for tag in tags:
                 tag_idx = np.where(self.mids == tag)[0][0]
                 self.ground_truth[i, tag_idx] = 1
+        
+        self.class_clip_n = self.ground_truth.sum(0).numpy()
+        self.missing_labels = self.labels[self.class_clip_n == 0]
 
 
-    def __len__(self): return len(self.file_list)
+    def __len__(self): return self.info.n_segs.sum()
 
     def __getitem__(self, item):
 
@@ -191,6 +224,29 @@ class FSD50k_MelSpec1s(Dataset):
             x = self.transforms(x)
 
         return x.unsqueeze(0), y, filepath
+
+        
+    def display_class_contents(self, height=20, width=20):
+        '''displays a bar chart showing number of clips per class in dataset'''
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4)
+        fig.set_figheight(20)
+        fig.set_figwidth(20)
+        
+        upper_ylim = round(int(torch.max(self.ground_truth.sum(0))), -3)
+        
+        for n, ax in enumerate((ax1, ax2, ax3, ax4)):
+            
+            l, u = n*50, n*50 + 50
+            
+            ax.set_ylim(0, upper_ylim)
+            ax.bar(self.labels[l:u], self.class_clip_n[l:u])
+            
+            for tick in ax.get_xticklabels():
+                # still not ideal visually
+                tick.set_rotation(90)
+                
+     
+        
 
 # transform as per spec in FSD50k paper
 # paper states 30ms frames with 10ms overlap, output of shape
@@ -282,3 +338,147 @@ def segment_audio(file_list, out_dir, n_frames=101, n_overlap=50):
 # n_extra_frames = n_frames - len(audio_mel) % n_frames
 
 # audio_mel = torch.cat((audio_mel, audio_mel[:n_extra_frames]), 0)
+
+def train(n_epochs, optimiser, model, loss_func, device,
+          dataloader, val_dataloader=None, val_data=None,
+          best_epoch_path='checkpoints/best.pt',
+          checkpoints_dir='checkpoints/',
+          early_stopping_active=True,
+          plateau_catcher_active=True):
+
+    # could definitely add kwargs for these
+    if early_stopping_active:
+        early_stopping = EarlyStopping(
+            patience=10, verbose=True, path=best_epoch_path)
+
+    if plateau_catcher_active:
+        plateau_catcher = ReduceLROnPlateau(optimiser, mode='max',
+            patience=5, factor=0.5, verbose=True)
+
+    loss_history = []
+    val_loss_history = []
+    # epoch loop
+    for epoch in range(1, n_epochs + 1):
+
+        # model in learning mode
+        model.train()
+
+        train_loss = 0.0
+
+        # loop through all available batches of data
+        for x, y_true, _ in dataloader:
+
+            # send data to GPU if available
+            x = x.to(device); y_true = y_true.to(device)
+
+            # get predictions
+            y_pred = model(x)
+
+            # calculate losses
+            loss = loss_func(y_pred, y_true)
+
+            # clear gradients
+            optimiser.zero_grad()
+
+            # backpropagate loss
+            loss.backward()
+
+            # update weights
+            optimiser.step()
+
+            # sum losses over whole epoch
+            train_loss += loss.item()
+        
+        loss_history.append(train_loss / len(dataloader))
+
+        if val_dataloader:
+            # validation stage
+            model.eval()
+
+            val_clip_scores = torch.zeros(len(val_data.info), 200).to(device)
+            val_loss = 0.0
+
+            with torch.no_grad():
+                for x, y_true, filepath in val_dataloader:
+
+                    # send data to GPU if available
+                    x = x.to(device); y_true = y_true.to(device)
+
+                    # get predictions
+                    y_pred = model(x)
+
+                    # calculate losses
+                    loss = loss_func(y_pred, y_true)
+
+                    val_loss += loss.item()
+
+                    # save predictions for aggregation across whole clips
+                    for i, output in enumerate(y_pred):
+                        clip_number = int(filepath[i].split('/')[1].split('.')[0])
+                        clip_index = np.where(
+                            val_data.clip_order == clip_number)[0][0]
+                        val_clip_scores[clip_index] += output
+
+                # divide scores by number of segments per clip
+                # (averaging across segments)
+                val_clip_scores /= val_data.n_segs.to(device)
+
+                # calcuate pr-auc
+                val_pr_auc = pr_auc(
+                    val_clip_scores, val_data.ground_truth.to(device))
+
+                # if improvements plateau, reduce lr
+                if plateau_catcher_active: plateau_catcher.step(val_pr_auc)
+
+                # early stopping
+                # negative metric as expects loss to decrease
+                if early_stopping_active: 
+                    early_stopping(-val_pr_auc, model)
+                    if early_stopping.early_stop:
+                        print('Early stopping')
+                        break
+            val_loss_history.append(val_loss / len(val_dataloader))
+
+        checkpoint_path = checkpoints_dir +'epoch_' + str(epoch) + '.pt'
+        torch.save(model.state_dict(), checkpoint_path)
+
+        if val_dataloader:
+            print('{} Epoch {}, Train loss {}, Val loss {}, Val PR-AUC {}'.format(
+                datetime.datetime.now(), epoch,
+                train_loss / len(dataloader),
+                val_loss / len(val_dataloader),
+                val_pr_auc))
+        else:
+            print('{} Epoch {}, Train loss {}'.format(
+                datetime.datetime.now(), epoch,
+                train_loss / len(dataloader)))
+    return model, loss_history, val_loss_history
+
+
+def model_eval(model, test_dataloader, test_data,
+    best_epoch_path='checkpoints/best.pt'):
+
+    model.eval()
+    # initialise output aggregation array
+    test_clip_scores = torch.zeros(len(test_data.info), 200).to(device)
+
+    with torch.no_grad():
+        for x, y_true, filepath in test_dataloader:
+
+            # send data to GPU if available
+            x = x.to(device); y_true = y_true.to(device)
+
+            # get predictions
+            y_pred = model(x)
+
+            # save predictions for aggregation across whole clips
+            for i, output in enumerate(y_pred):
+                clip_number = int(filepath[i].split('/')[1].split('.')[0])
+                clip_index = np.where(test_data.clip_order == clip_number)[0][0]
+                test_clip_scores[clip_index] += output
+
+        # divide scores by number of segments per clip
+        # (averaging across segments)
+        test_clip_scores /= test_data.n_segs.to(device)
+
+    return test_clip_scores, test_data.ground_truth # (i.e. y_pred, y_true)
