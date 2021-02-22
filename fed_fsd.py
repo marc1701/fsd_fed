@@ -2,6 +2,8 @@ import numpy as np, pandas as pd
 import matplotlib.pyplot as plt
 import os, glob, datetime
 import torch, torchaudio
+import copy
+import random
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, IterableDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -144,12 +146,18 @@ class FSD50k_MelSpec1s(Dataset):
     96-band mel-spectrogram representation'''
 
     def __init__(self, transforms=None, split='train',
-                 uploader_min=0,
+                 uploader_min=0, uploader_name=None,
                  anno_dir='FSD50K.ground_truth/'):
 
         self.transforms = transforms
 
-        data_path = 'FSD50k_' + split + '_1sec_segs/'
+        self.data_path = 'FSD50k_' + split + '_1sec_segs/'
+        
+        # load labels
+        vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
+        self.labels = vocab[1]
+        self.mids = vocab[2]
+        self.len_vocab = len(vocab)
 
         self.info = pd.read_csv(anno_dir + split + '.csv')
         if uploader_min: # if user has set a value for minimum clips
@@ -158,32 +166,33 @@ class FSD50k_MelSpec1s(Dataset):
             uploaders = [name for name in uploaders.keys() if uploaders[name]]
             # remove all uploaders that do not meet the minimum clip threshold
             self.info = self.info[self.info.uploader.isin(uploaders)]
+
+        # in case user sets single uploader
+        self._full_info = self.info
+        # list of available uploaders
+        self.all_uploaders = self._full_info.uploader.unique()
         
-#         if uploader_min > 0:
-#             # make a file list using only those uploaders selected
-#             self.file_list = []
-#             for n in range(len(self.info)):
-#                 self.file_list.append(
-#                     glob.glob(data_path + str(self.info.fname[n]) + '*'))
-#         else:
-#             # all files
-#             self.file_list = glob.glob(data_path + '/*')
-            
-            
-        # this method of making a file list is much faster and should work
+        # if user has specified an uploader, set it here
+        if uploader_name: self.set_uploader(uploader_name)
+        else: self._import_data()
+        
+    def __len__(self): return self.info.n_segs.sum()
+    
+    def set_uploader(self, uploader_name):
+        self.info = self._full_info[self._full_info.uploader == uploader_name]
+        self.uploader = uploader_name
+        self._import_data()
+    
+    def _import_data(self):
+        # this method of making a file list should work
         # regardless of whether full set or subset is used
         self.file_list = []
         for fname in self.info.fname:
             n_segs = int(self.info[self.info.fname==fname].n_segs)
             
             for n in range(n_segs):
-                filepath = data_path + str(fname) + '.' + str(n) + '.pt'
+                filepath = self.data_path + str(fname) + '.' + str(n) + '.pt'
                 self.file_list.append(filepath)
-
-        vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
-        self.labels = vocab[1]
-        self.mids = vocab[2]
-        self.len_vocab = len(vocab)
 
         # order of clips in tensor
         self.clip_order = torch.tensor(self.info['fname'].to_numpy())
@@ -192,20 +201,16 @@ class FSD50k_MelSpec1s(Dataset):
             self.info['n_segs'].to_numpy()).unsqueeze(1)
 
         # set up ground truth array
-        # hopefully pr-auc can do the whole array
-        # but can compare this to the output array line-by-line if needs be
         self.ground_truth = torch.zeros(len(self.info), self.len_vocab)
         for i, clip_number in enumerate(self.clip_order):
             tags = self.info.iloc[i]['mids'].split(',')
             for tag in tags:
                 tag_idx = np.where(self.mids == tag)[0][0]
                 self.ground_truth[i, tag_idx] = 1
-        
+                
+        # other useful properties
         self.class_clip_n = self.ground_truth.sum(0).numpy()
-        self.missing_labels = self.labels[self.class_clip_n == 0]
-
-
-    def __len__(self): return self.info.n_segs.sum()
+        self.missing_classes = self.labels[self.class_clip_n == 0]
 
     def __getitem__(self, item):
 
@@ -232,6 +237,7 @@ class FSD50k_MelSpec1s(Dataset):
         fig.set_figheight(20)
         fig.set_figwidth(20)
         
+        # need to edit this so it detects order of magnitude
         upper_ylim = round(int(torch.max(self.ground_truth.sum(0))), -3)
         
         for n, ax in enumerate((ax1, ax2, ax3, ax4)):
@@ -331,9 +337,6 @@ def segment_audio(file_list, out_dir, n_frames=101, n_overlap=50):
             torch.save(audio_mel[i * n_overlap: i * n_overlap + n_frames],
                 filepath_out)
 
-
-
-
 # calculate how many extra frames are needed for exact split
 # n_extra_frames = n_frames - len(audio_mel) % n_frames
 
@@ -391,6 +394,7 @@ def train(n_epochs, optimiser, model, loss_func, device,
         
         loss_history.append(train_loss / len(dataloader))
 
+        # !!! COULD VERY LIKELY SUBSTITUTE THIS FOR EVAL FUNC !!!
         if val_dataloader:
             # validation stage
             model.eval()
@@ -455,7 +459,7 @@ def train(n_epochs, optimiser, model, loss_func, device,
     return model, loss_history, val_loss_history
 
 
-def model_eval(model, test_dataloader, test_data,
+def model_eval(model, test_dataloader, test_data, device,
     best_epoch_path='checkpoints/best.pt'):
 
     model.eval()
@@ -482,3 +486,82 @@ def model_eval(model, test_dataloader, test_data,
         test_clip_scores /= test_data.n_segs.to(device)
 
     return test_clip_scores, test_data.ground_truth # (i.e. y_pred, y_true)
+
+# TEST THIS NEXT
+def federated_train(model, device, loss_func, clients, rounds, 
+                    C=0.2, B=64, E=4, lr=5e-04, lr_decay=0):
+# C = 0.2 # fraction of clients to select for training (1/5th)
+# B = 64 # local minibatch size
+# E = 4 # local epochs - keeping this low - best benchmark was E=4
+# lr = 5e-4 # same as FSD benchmark
+# lr_decay = 0 # for now
+
+    glob_model = model.to(device)
+    
+    n_clients_to_select = round(C * len(clients))
+    
+    len_data = sum([len(client) for client in clients])
+    
+    for i in range(rounds):
+        print('Round ', str(i))
+        # randomly select clients for this round
+        this_rounds_clients = random.sample(clients, n_clients_to_select)
+
+        # set up dict with dataloaders and models for each client
+        this_rounds_data = dict()
+        for client in this_rounds_clients:
+            this_rounds_data[client.uploader] = [client,
+                DataLoader(client, batch_size=B, num_workers=12, shuffle=True),
+                    copy.deepcopy(glob_model)]
+
+        # train client models
+        for key, item in this_rounds_data.items():
+
+            client, dataloader, model = item
+            optim = torch.optim.Adam(model.parameters(), lr=lr)
+            print("\nTraining {}'s model".format(key))
+
+            train(n_epochs=E,
+                  optimiser=optim,
+                  model=model,
+                  loss_func=loss_func,
+                  device=device,
+                  dataloader=dataloader)
+
+        # store old global model state
+        prev_glob_model = copy.deepcopy(glob_model)
+
+        # zero out global model parameters
+        zero_model_params(glob_model)
+
+        # total weight for previous global model
+        untrained_weight = 1
+        # add weighted weights (ha) from this round's local models
+        print('\nMerging model weights...')
+        for key, item in this_rounds_data.items():
+
+            client, _, client_model = item
+            client_weight = len(client) / len_data
+
+            fed_weight_update(glob_model, client_model, client_weight)
+
+            untrained_weight -= client_weight
+
+        # add previous model weights back in 
+        # (representing the local models not trained this time around)
+        # (this behaviour should be alterable after Nilsson)
+        fed_weight_update(glob_model, prev_glob_model, untrained_weight)
+    
+            
+def fed_weight_update(model_a, model_b, weight):
+    with torch.no_grad():
+        for params_a, params_b in zip(model_a.parameters(), model_b.parameters()):
+            params_a.data += weight * params_b.data
+
+def zero_model_params(model):
+        
+    device = torch.device('cuda') if next(
+        model.parameters()).is_cuda else torch.device('cpu')
+    with torch.no_grad():
+        for param in model.parameters():
+            param.data = torch.zeros(param.data.shape).to(device)
