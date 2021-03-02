@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import os, glob, datetime
 import torch, torchaudio
 import copy
+import lmdb
 import random
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, IterableDataset
@@ -309,6 +310,111 @@ class FSD50k(Dataset):
         return x, y
 
     def __len__(self): return len(self.info)
+    
+    
+class FSD50k_lmdbwrap(Dataset):
+    
+    def __init__(self, transforms=None, split='test',
+                 uploader_min=0, uploader_name=None,
+                 anno_dir='FSD50K.ground_truth/'):
+        
+        lmdb_path = 'lmdb_data/FSD50k_' + split + '_1sec_segs/'
+        
+        vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
+        self.labels = vocab[1]
+        self.mids = vocab[2]
+        self.len_vocab = len(vocab)
+        
+        # load relevant lmdb database
+        self.lmdb_data = MelDatabase(lmdb_path)
+        self.info = pd.read_csv(anno_dir + split + '.csv')
+        if uploader_min: # if user has set a value for minimum clips
+            uploaders = (
+                self.info.uploader.value_counts() >= uploader_min).to_dict()
+            uploaders = [name for name in uploaders.keys() if uploaders[name]]
+            # remove all uploaders that do not meet the minimum clip threshold
+            self.info = self.info[self.info.uploader.isin(uploaders)]
+
+        # in case user sets single uploader
+        self._full_info = self.info
+        # list of available uploaders
+        self.all_uploaders = self._full_info.uploader.unique()
+        
+        # if user has specified an uploader, set it here
+        if uploader_name: self.set_uploader(uploader_name)
+        else: self._import_data()
+        
+        self._import_data()
+        
+    def _import_data(self):
+        # this method of making a file list should work
+        # regardless of whether full set or subset is used
+#         self.file_list = list(self.lmdb_data.keys)
+        self.file_list = []
+        for fname in self.info.fname:
+            n_segs = int(self.info[self.info.fname==fname].n_segs)
+            
+            for n in range(n_segs):
+                filepath = str(fname) + '.' + str(n)
+                self.file_list.append(filepath)
+
+        # order of clips in tensor
+        self.clip_order = torch.tensor(self.info['fname'].to_numpy())
+        # number of segments in tensor
+        self.n_segs = torch.tensor(
+            self.info['n_segs'].to_numpy()).unsqueeze(1)
+
+        # set up ground truth array
+        self.ground_truth = torch.zeros(len(self.info), self.len_vocab)
+        for i, clip_number in enumerate(self.clip_order):
+            tags = self.info.iloc[i]['mids'].split(',')
+            for tag in tags:
+                tag_idx = np.where(self.mids == tag)[0][0]
+                self.ground_truth[i, tag_idx] = 1
+                
+        # other useful properties
+        self.class_clip_n = self.ground_truth.sum(0).numpy()
+        self.missing_classes = self.labels[self.class_clip_n == 0]
+    
+    def __len__(self): return self.info.n_segs.sum()
+    
+    def set_uploader(self, uploader_name):
+        self.info = self._full_info[self._full_info.uploader == uploader_name]
+        self.uploader = uploader_name
+        self._import_data()
+                
+    def __getitem__(self, item):
+        
+        filepath = self.file_list[item]
+        x = self.lmdb_data[filepath]
+        
+        # find index of original audio clip from filename
+        clip_index = int(filepath[filepath.find('/') +1:].split('.')[0])
+        csv_index = np.where(self.clip_order == clip_index)[0][0]
+
+        y = self.ground_truth[csv_index]
+        
+        return x.unsqueeze(0), y, filepath
+    
+    def display_class_contents(self, height=20, width=20):
+        '''displays a bar chart showing number of clips per class in dataset'''
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4)
+        fig.set_figheight(20)
+        fig.set_figwidth(20)
+        
+        # need to edit this so it detects order of magnitude
+        upper_ylim = round(int(torch.max(self.ground_truth.sum(0))), -3)
+        
+        for n, ax in enumerate((ax1, ax2, ax3, ax4)):
+            
+            l, u = n*50, n*50 + 50
+            
+            ax.set_ylim(0, upper_ylim)
+            ax.bar(self.labels[l:u], self.class_clip_n[l:u])
+            
+            for tick in ax.get_xticklabels():
+                # still not ideal visually
+                tick.set_rotation(90)
 
 
 def segment_audio(file_list, out_dir, n_frames=101, n_overlap=50):
@@ -347,12 +453,15 @@ def train(n_epochs, optimiser, model, loss_func, device,
           best_epoch_path='checkpoints/best.pt',
           checkpoints_dir='checkpoints/',
           early_stopping_active=True,
-          plateau_catcher_active=True):
+          plateau_catcher_active=True,
+          early_stopping_patience=10,
+          log=None,
+          verbose=True):
 
     # could definitely add kwargs for these
     if early_stopping_active:
         early_stopping = EarlyStopping(
-            patience=10, verbose=True, path=best_epoch_path)
+            patience=early_stopping_patience, verbose=True, path=best_epoch_path)
 
     if plateau_catcher_active:
         plateau_catcher = ReduceLROnPlateau(optimiser, mode='max',
@@ -439,7 +548,7 @@ def train(n_epochs, optimiser, model, loss_func, device,
                 if early_stopping_active: 
                     early_stopping(-val_pr_auc, model)
                     if early_stopping.early_stop:
-                        print('Early stopping')
+                        if verbose: print('Early stopping')
                         break
             val_loss_history.append(val_loss / len(val_dataloader))
 
@@ -447,20 +556,31 @@ def train(n_epochs, optimiser, model, loss_func, device,
         torch.save(model.state_dict(), checkpoint_path)
 
         if val_dataloader:
-            print('{} Epoch {}, Train loss {}, Val loss {}, Val PR-AUC {}'.format(
+            if log: log.write(
+                '{} Epoch {}, Train loss {}, Val loss {}, Val PR-AUC {}'.format(
+                datetime.datetime.now(), epoch,
+                train_loss / len(dataloader),
+                val_loss / len(val_dataloader),
+                val_pr_auc))
+            if verbose: print(
+                '{} Epoch {}, Train loss {}, Val loss {}, Val PR-AUC {}'.format(
                 datetime.datetime.now(), epoch,
                 train_loss / len(dataloader),
                 val_loss / len(val_dataloader),
                 val_pr_auc))
         else:
-            print('{} Epoch {}, Train loss {}'.format(
+            if log: log.write('{} Epoch {}, Train loss {}'.format(
                 datetime.datetime.now(), epoch,
                 train_loss / len(dataloader)))
+            if verbose: print('{} Epoch {}, Train loss {}'.format(
+                datetime.datetime.now(), epoch,
+                train_loss / len(dataloader)))
+                
+    # one will have to manually close log file after using this function
     return model, loss_history, val_loss_history
 
 
-def model_eval(model, test_dataloader, test_data, device,
-    best_epoch_path='checkpoints/best.pt'):
+def model_eval(model, test_dataloader, test_data, device):
 
     model.eval()
     # initialise output aggregation array
@@ -485,16 +605,23 @@ def model_eval(model, test_dataloader, test_data, device,
         # (averaging across segments)
         test_clip_scores /= test_data.n_segs.to(device)
 
-    return test_clip_scores, test_data.ground_truth # (i.e. y_pred, y_true)
+    return test_clip_scores.cpu(), test_data.ground_truth # (i.e. y_pred, y_true)
 
-# TEST THIS NEXT
+
 def federated_train(model, device, loss_func, clients, rounds, 
-                    C=0.2, B=64, E=4, lr=5e-04, lr_decay=0):
+                    C=0.2, B=64, E=4, lr=5e-04, lr_decay=0,
+                    val_dataloader=None, val_data=None,
+                    early_stopping_active=False,
+                    best_epoch_path='checkpoints/best.pt',
+                    log=None, verbose=True):
 # C = 0.2 # fraction of clients to select for training (1/5th)
 # B = 64 # local minibatch size
 # E = 4 # local epochs - keeping this low - best benchmark was E=4
 # lr = 5e-4 # same as FSD benchmark
 # lr_decay = 0 # for now
+    if early_stopping_active:
+        early_stopping = EarlyStopping(
+            patience=10, verbose=True, path=best_epoch_path)
 
     glob_model = model.to(device)
     
@@ -502,8 +629,12 @@ def federated_train(model, device, loss_func, clients, rounds,
     
     len_data = sum([len(client) for client in clients])
     
+    val_loss_history = []
+    
     for i in range(rounds):
-        print('Round ', str(i))
+        if log: log.write('Round ' + str(i+1))
+        if verbose: print('Round ' + str(i+1))
+            
         # randomly select clients for this round
         this_rounds_clients = random.sample(clients, n_clients_to_select)
 
@@ -518,15 +649,21 @@ def federated_train(model, device, loss_func, clients, rounds,
         for key, item in this_rounds_data.items():
 
             client, dataloader, model = item
+            # optim must get the client model parameters
+            # ? weight decay
             optim = torch.optim.Adam(model.parameters(), lr=lr)
-            print("\nTraining {}'s model".format(key))
+            
+            if log: log.write("\nTraining {}'s model".format(key))
+            if verbose: print("\nTraining {}'s model".format(key))
 
             train(n_epochs=E,
                   optimiser=optim,
                   model=model,
                   loss_func=loss_func,
                   device=device,
-                  dataloader=dataloader)
+                  dataloader=dataloader,
+                  early_stopping_active=False,
+                  plateau_catcher_active=False)
 
         # store old global model state
         prev_glob_model = copy.deepcopy(glob_model)
@@ -537,7 +674,7 @@ def federated_train(model, device, loss_func, clients, rounds,
         # total weight for previous global model
         untrained_weight = 1
         # add weighted weights (ha) from this round's local models
-        print('\nMerging model weights...')
+#         print('\nMerging model weights...')
         for key, item in this_rounds_data.items():
 
             client, _, client_model = item
@@ -551,6 +688,26 @@ def federated_train(model, device, loss_func, clients, rounds,
         # (representing the local models not trained this time around)
         # (this behaviour should be alterable after Nilsson)
         fed_weight_update(glob_model, prev_glob_model, untrained_weight)
+        
+        if val_data:
+            if verbose: print('\nEvaluating global model...')
+            y_pred_val, y_true_val = model_eval(
+                glob_model, val_dataloader, val_data, device)
+            auc_val = pr_auc(y_pred_val, y_true_val)
+            
+            val_loss_history.append(auc_val)
+            
+            if log: log.write('\nGlobal Val PR-AUC: {:.4f}'.format(float(auc_val)))
+            if verbose: print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
+            
+            if early_stopping_active: 
+                early_stopping(-auc_val, glob_model)
+                if early_stopping.early_stop:
+                    if verbose: print('Early stopping')
+#                     break
+                    return torch.load(best_epoch_path), val_loss_history
+    
+    return torch.load(best_epoch_path), np.array(val_loss_history)
     
             
 def fed_weight_update(model_a, model_b, weight):
