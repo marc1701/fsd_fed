@@ -1,6 +1,6 @@
 import numpy as np, pandas as pd
 import matplotlib.pyplot as plt
-import os, glob, datetime
+import os, glob, datetime, io
 import torch, torchaudio
 import copy
 import lmdb
@@ -8,7 +8,11 @@ import random
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, IterableDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from Databases import *
+from pathlib import Path
+import pickle
 
+from visdom import Visdom
 from pytorchtools import EarlyStopping
 
 import seaborn as sns; sns.set()
@@ -153,7 +157,7 @@ class FSD50k_MelSpec1s(Dataset):
         self.transforms = transforms
 
         self.data_path = 'FSD50k_' + split + '_1sec_segs/'
-        
+
         # load labels
         vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
         self.labels = vocab[1]
@@ -172,25 +176,25 @@ class FSD50k_MelSpec1s(Dataset):
         self._full_info = self.info
         # list of available uploaders
         self.all_uploaders = self._full_info.uploader.unique()
-        
+
         # if user has specified an uploader, set it here
         if uploader_name: self.set_uploader(uploader_name)
         else: self._import_data()
-        
+
     def __len__(self): return self.info.n_segs.sum()
-    
+
     def set_uploader(self, uploader_name):
         self.info = self._full_info[self._full_info.uploader == uploader_name]
         self.uploader = uploader_name
         self._import_data()
-    
+
     def _import_data(self):
         # this method of making a file list should work
         # regardless of whether full set or subset is used
         self.file_list = []
         for fname in self.info.fname:
             n_segs = int(self.info[self.info.fname==fname].n_segs)
-            
+
             for n in range(n_segs):
                 filepath = self.data_path + str(fname) + '.' + str(n) + '.pt'
                 self.file_list.append(filepath)
@@ -208,7 +212,7 @@ class FSD50k_MelSpec1s(Dataset):
             for tag in tags:
                 tag_idx = np.where(self.mids == tag)[0][0]
                 self.ground_truth[i, tag_idx] = 1
-                
+
         # other useful properties
         self.class_clip_n = self.ground_truth.sum(0).numpy()
         self.missing_classes = self.labels[self.class_clip_n == 0]
@@ -231,29 +235,29 @@ class FSD50k_MelSpec1s(Dataset):
 
         return x.unsqueeze(0), y, filepath
 
-        
+
     def display_class_contents(self, height=20, width=20):
         '''displays a bar chart showing number of clips per class in dataset'''
         fig, (ax1, ax2, ax3, ax4) = plt.subplots(4)
         fig.set_figheight(20)
         fig.set_figwidth(20)
-        
+
         # need to edit this so it detects order of magnitude
         upper_ylim = round(int(torch.max(self.ground_truth.sum(0))), -3)
-        
+
         for n, ax in enumerate((ax1, ax2, ax3, ax4)):
-            
+
             l, u = n*50, n*50 + 50
-            
+
             ax.set_ylim(0, upper_ylim)
             ax.bar(self.labels[l:u], self.class_clip_n[l:u])
-            
+
             for tick in ax.get_xticklabels():
                 # still not ideal visually
                 tick.set_rotation(90)
-                
-     
-        
+
+
+
 
 # transform as per spec in FSD50k paper
 # paper states 30ms frames with 10ms overlap, output of shape
@@ -310,21 +314,63 @@ class FSD50k(Dataset):
         return x, y
 
     def __len__(self): return len(self.info)
-    
-    
+
+# G. Rochette (gitlab.eps.surrey.ac.uk/gr00311/Databases/-/blob/master/database.py)
+class Database(object):
+    def __init__(self, path: Path):
+        path = str(path)
+        self.db = lmdb.open(
+            path=path,
+            readonly=True,
+            readahead=False,
+            max_spare_txns=128,
+            lock=False,
+        )
+        with self.db.begin() as txn:
+            keys = pickle.loads(txn.get(key=pickle.dumps("keys")))
+        self.keys = set(keys)
+
+    def __iter__(self):
+        return iter(self.keys)
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, item):
+        key = pickle.dumps(item)
+        with self.db.begin() as txn:
+            value = txn.get(key=key)
+        return value
+
+    def __del__(self):
+        self.db.close()
+
+
+class MelDatabase(Database):
+    def __init__(self, path: Path):
+        super(MelDatabase, self).__init__(path=path)
+
+    def __getitem__(self, item):
+        key = pickle.dumps(item)
+        with self.db.begin() as txn:
+            value = txn.get(key=key)
+            tensor = torch.load(io.BytesIO(value))
+        return tensor
+
+
 class FSD50k_lmdbwrap(Dataset):
-    
+
     def __init__(self, transforms=None, split='test',
                  uploader_min=0, uploader_name=None,
                  anno_dir='FSD50K.ground_truth/'):
-        
+
         lmdb_path = 'lmdb_data/FSD50k_' + split + '_1sec_segs/'
-        
+
         vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
         self.labels = vocab[1]
         self.mids = vocab[2]
         self.len_vocab = len(vocab)
-        
+
         # load relevant lmdb database
         self.lmdb_data = MelDatabase(lmdb_path)
         self.info = pd.read_csv(anno_dir + split + '.csv')
@@ -339,13 +385,13 @@ class FSD50k_lmdbwrap(Dataset):
         self._full_info = self.info
         # list of available uploaders
         self.all_uploaders = self._full_info.uploader.unique()
-        
+
         # if user has specified an uploader, set it here
         if uploader_name: self.set_uploader(uploader_name)
         else: self._import_data()
-        
+
         self._import_data()
-        
+
     def _import_data(self):
         # this method of making a file list should work
         # regardless of whether full set or subset is used
@@ -353,7 +399,7 @@ class FSD50k_lmdbwrap(Dataset):
         self.file_list = []
         for fname in self.info.fname:
             n_segs = int(self.info[self.info.fname==fname].n_segs)
-            
+
             for n in range(n_segs):
                 filepath = str(fname) + '.' + str(n)
                 self.file_list.append(filepath)
@@ -371,47 +417,47 @@ class FSD50k_lmdbwrap(Dataset):
             for tag in tags:
                 tag_idx = np.where(self.mids == tag)[0][0]
                 self.ground_truth[i, tag_idx] = 1
-                
+
         # other useful properties
         self.class_clip_n = self.ground_truth.sum(0).numpy()
         self.missing_classes = self.labels[self.class_clip_n == 0]
-    
+
     def __len__(self): return self.info.n_segs.sum()
-    
+
     def set_uploader(self, uploader_name):
         self.info = self._full_info[self._full_info.uploader == uploader_name]
         self.uploader = uploader_name
         self._import_data()
-                
+
     def __getitem__(self, item):
-        
+
         filepath = self.file_list[item]
         x = self.lmdb_data[filepath]
-        
+
         # find index of original audio clip from filename
         clip_index = int(filepath[filepath.find('/') +1:].split('.')[0])
         csv_index = np.where(self.clip_order == clip_index)[0][0]
 
         y = self.ground_truth[csv_index]
-        
+
         return x.unsqueeze(0), y, filepath
-    
+
     def display_class_contents(self, height=20, width=20):
         '''displays a bar chart showing number of clips per class in dataset'''
         fig, (ax1, ax2, ax3, ax4) = plt.subplots(4)
         fig.set_figheight(20)
         fig.set_figwidth(20)
-        
+
         # need to edit this so it detects order of magnitude
         upper_ylim = round(int(torch.max(self.ground_truth.sum(0))), -3)
-        
+
         for n, ax in enumerate((ax1, ax2, ax3, ax4)):
-            
+
             l, u = n*50, n*50 + 50
-            
+
             ax.set_ylim(0, upper_ylim)
             ax.bar(self.labels[l:u], self.class_clip_n[l:u])
-            
+
             for tick in ax.get_xticklabels():
                 # still not ideal visually
                 tick.set_rotation(90)
@@ -456,7 +502,17 @@ def train(n_epochs, optimiser, model, loss_func, device,
           plateau_catcher_active=True,
           early_stopping_patience=10,
           log=None,
-          verbose=True):
+          verbose=True,
+          visdom=True):
+
+    if visdom:
+        vis = Visdom()
+        if val_dataloader:
+            vis.line([[0.,0.]], [0],
+                win='loss_plot', opts=dict(title='Loss', legend=['Train', 'Val']))
+        else:
+            vis.line([0.], [0],
+                win='loss_plot', opts=dict(title='Loss', legend=['Loss']))
 
     # could definitely add kwargs for these
     if early_stopping_active:
@@ -500,7 +556,7 @@ def train(n_epochs, optimiser, model, loss_func, device,
 
             # sum losses over whole epoch
             train_loss += loss.item()
-        
+
         loss_history.append(train_loss / len(dataloader))
 
         # !!! COULD VERY LIKELY SUBSTITUTE THIS FOR EVAL FUNC !!!
@@ -527,7 +583,7 @@ def train(n_epochs, optimiser, model, loss_func, device,
 
                     # save predictions for aggregation across whole clips
                     for i, output in enumerate(y_pred):
-                        clip_number = int(filepath[i].split('/')[1].split('.')[0])
+                        clip_number = int(filepath[0].split('.')[0])
                         clip_index = np.where(
                             val_data.clip_order == clip_number)[0][0]
                         val_clip_scores[clip_index] += output
@@ -545,7 +601,7 @@ def train(n_epochs, optimiser, model, loss_func, device,
 
                 # early stopping
                 # negative metric as expects loss to decrease
-                if early_stopping_active: 
+                if early_stopping_active:
                     early_stopping(-val_pr_auc, model)
                     if early_stopping.early_stop:
                         if verbose: print('Early stopping')
@@ -556,26 +612,29 @@ def train(n_epochs, optimiser, model, loss_func, device,
         torch.save(model.state_dict(), checkpoint_path)
 
         if val_dataloader:
-            if log: log.write(
-                '{} Epoch {}, Train loss {}, Val loss {}, Val PR-AUC {}'.format(
+            log_string = (
+                '\n{} Epoch {}, Train loss {}, Val loss {}, Val PR-AUC {}'.format(
                 datetime.datetime.now(), epoch,
                 train_loss / len(dataloader),
                 val_loss / len(val_dataloader),
                 val_pr_auc))
-            if verbose: print(
-                '{} Epoch {}, Train loss {}, Val loss {}, Val PR-AUC {}'.format(
-                datetime.datetime.now(), epoch,
-                train_loss / len(dataloader),
-                val_loss / len(val_dataloader),
-                val_pr_auc))
+            if visdom:
+                vis.line(
+                [[train_loss / len(dataloader), val_loss / len(val_dataloader)]],
+                    [epoch-1], win='loss_plot', update='append')
         else:
-            if log: log.write('{} Epoch {}, Train loss {}'.format(
+            log_string = (
+                '\n{} Epoch {}, Train loss {}'.format(
                 datetime.datetime.now(), epoch,
                 train_loss / len(dataloader)))
-            if verbose: print('{} Epoch {}, Train loss {}'.format(
-                datetime.datetime.now(), epoch,
-                train_loss / len(dataloader)))
-                
+            if visdom:
+                vis.line(
+                [train_loss / len(dataloader)], [epoch-1],
+                    win='loss_plot', update='append')
+
+        if log: log.write(log_string)
+        if verbose: print(log_string, end=" ")
+
     # one will have to manually close log file after using this function
     return model, loss_history, val_loss_history
 
@@ -608,7 +667,7 @@ def model_eval(model, test_dataloader, test_data, device):
     return test_clip_scores.cpu(), test_data.ground_truth # (i.e. y_pred, y_true)
 
 
-def federated_train(model, device, loss_func, clients, rounds, 
+def federated_train(model, device, loss_func, clients, rounds,
                     C=0.2, B=64, E=4, lr=5e-04, lr_decay=0,
                     val_dataloader=None, val_data=None,
                     early_stopping_active=False,
@@ -624,17 +683,17 @@ def federated_train(model, device, loss_func, clients, rounds,
             patience=10, verbose=True, path=best_epoch_path)
 
     glob_model = model.to(device)
-    
+
     n_clients_to_select = round(C * len(clients))
-    
+
     len_data = sum([len(client) for client in clients])
-    
+
     val_loss_history = []
-    
+
     for i in range(rounds):
         if log: log.write('Round ' + str(i+1))
         if verbose: print('Round ' + str(i+1))
-            
+
         # randomly select clients for this round
         this_rounds_clients = random.sample(clients, n_clients_to_select)
 
@@ -652,7 +711,7 @@ def federated_train(model, device, loss_func, clients, rounds,
             # optim must get the client model parameters
             # ? weight decay
             optim = torch.optim.Adam(model.parameters(), lr=lr)
-            
+
             if log: log.write("\nTraining {}'s model".format(key))
             if verbose: print("\nTraining {}'s model".format(key))
 
@@ -684,39 +743,39 @@ def federated_train(model, device, loss_func, clients, rounds,
 
             untrained_weight -= client_weight
 
-        # add previous model weights back in 
+        # add previous model weights back in
         # (representing the local models not trained this time around)
         # (this behaviour should be alterable after Nilsson)
         fed_weight_update(glob_model, prev_glob_model, untrained_weight)
-        
+
         if val_data:
             if verbose: print('\nEvaluating global model...')
             y_pred_val, y_true_val = model_eval(
                 glob_model, val_dataloader, val_data, device)
             auc_val = pr_auc(y_pred_val, y_true_val)
-            
+
             val_loss_history.append(auc_val)
-            
+
             if log: log.write('\nGlobal Val PR-AUC: {:.4f}'.format(float(auc_val)))
             if verbose: print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
-            
-            if early_stopping_active: 
+
+            if early_stopping_active:
                 early_stopping(-auc_val, glob_model)
                 if early_stopping.early_stop:
                     if verbose: print('Early stopping')
 #                     break
                     return torch.load(best_epoch_path), val_loss_history
-    
+
     return torch.load(best_epoch_path), np.array(val_loss_history)
-    
-            
+
+
 def fed_weight_update(model_a, model_b, weight):
     with torch.no_grad():
         for params_a, params_b in zip(model_a.parameters(), model_b.parameters()):
             params_a.data += weight * params_b.data
 
 def zero_model_params(model):
-        
+
     device = torch.device('cuda') if next(
         model.parameters()).is_cuda else torch.device('cpu')
     with torch.no_grad():
