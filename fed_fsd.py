@@ -6,7 +6,7 @@ import copy
 import lmdb
 import random
 from torch import nn
-from torch.utils.data import Dataset, DataLoader, IterableDataset
+from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from Databases import *
 from pathlib import Path
@@ -132,12 +132,18 @@ class FSD_VGG(nn.Module):
 
 
     def forward(self, x):
+
         x = self.conv_group1(x)
         x = self.conv_group2(x)
         x = self.conv_group3(x)
 
         x_max = self.glob_maxpool(x).squeeze()
         x_avg = self.glob_avgpool(x).squeeze()
+
+        # in case 'batch' of one is missing first dimension
+        if x_max.ndim < 2:
+            x_max = x_max.unsqueeze(0)
+            x_avg = x_avg.unsqueeze(0)
 
         x = torch.cat((x_max, x_avg), 1)
 
@@ -152,11 +158,16 @@ class FSD50k_MelSpec1s(Dataset):
 
     def __init__(self, transforms=None, split='train',
                  uploader_min=0, uploader_name=None,
-                 anno_dir='FSD50K.ground_truth/'):
+                 anno_dir='FSD50K.ground_truth/',
+                 subdir=None):
 
         self.transforms = transforms
 
         self.data_path = 'FSD50k_' + split + '_1sec_segs/'
+
+        if subdir:
+            self.data_path = os.path.join(subdir, self.data_path)
+            anno_dir = os.path.join(subdir, anno_dir)
 
         # load labels
         vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
@@ -224,7 +235,7 @@ class FSD50k_MelSpec1s(Dataset):
         x = torch.load(filepath)
 
         # find index of original audio clip from filename
-        clip_index = int(filepath[filepath.find('/') +1:].split('.')[0])
+        clip_index = int(filepath.split('/')[-1].split('.')[0])
         csv_index = np.where(self.clip_order == clip_index)[0][0]
 
         y = self.ground_truth[csv_index]
@@ -255,8 +266,6 @@ class FSD50k_MelSpec1s(Dataset):
             for tick in ax.get_xticklabels():
                 # still not ideal visually
                 tick.set_rotation(90)
-
-
 
 
 # transform as per spec in FSD50k paper
@@ -361,11 +370,15 @@ class MelDatabase(Database):
 class FSD50k_lmdbwrap(Dataset):
 
     def __init__(self, transforms=None, split='test',
-                 uploader_min=0, uploader_name=None,
-                 anno_dir='FSD50K.ground_truth/'):
+                 uploader_min=0, uploader_name=None, subdir=None,
+                 anno_dir='FSD50K.ground_truth/', annotations='all'):
 
         lmdb_path = 'lmdb_data/FSD50k_' + split + '_1sec_segs/'
+        if subdir:
+            lmdb_path = os.path.join(subdir, lmdb_path)
+            anno_dir = os.path.join(subdir, anno_dir)
 
+        self.annotations = annotations
         vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
         self.labels = vocab[1]
         self.mids = vocab[2]
@@ -413,7 +426,10 @@ class FSD50k_lmdbwrap(Dataset):
         # set up ground truth array
         self.ground_truth = torch.zeros(len(self.info), self.len_vocab)
         for i, clip_number in enumerate(self.clip_order):
-            tags = self.info.iloc[i]['mids'].split(',')
+            if self.annotations == 'all':
+                tags = self.info.iloc[i]['mids'].split(',')
+            elif self.annotations == 'single':
+                tags = self.info.iloc[i]['single_labels'].split(',')
             for tag in tags:
                 tag_idx = np.where(self.mids == tag)[0][0]
                 self.ground_truth[i, tag_idx] = 1
@@ -435,7 +451,7 @@ class FSD50k_lmdbwrap(Dataset):
         x = self.lmdb_data[filepath]
 
         # find index of original audio clip from filename
-        clip_index = int(filepath[filepath.find('/') +1:].split('.')[0])
+        clip_index = int(filepath.split('/')[-1].split('.')[0])
         csv_index = np.where(self.clip_order == clip_index)[0][0]
 
         y = self.ground_truth[csv_index]
@@ -449,13 +465,13 @@ class FSD50k_lmdbwrap(Dataset):
         fig.set_figwidth(20)
 
         # need to edit this so it detects order of magnitude
-        upper_ylim = round(int(torch.max(self.ground_truth.sum(0))), -3)
+        # upper_ylim = round(int(torch.max(self.ground_truth.sum(0))), -3)
 
         for n, ax in enumerate((ax1, ax2, ax3, ax4)):
 
             l, u = n*50, n*50 + 50
 
-            ax.set_ylim(0, upper_ylim)
+            # ax.set_ylim(0, upper_ylim)
             ax.bar(self.labels[l:u], self.class_clip_n[l:u])
 
             for tick in ax.get_xticklabels():
@@ -467,7 +483,7 @@ def segment_audio(file_list, out_dir, n_frames=101, n_overlap=50):
 
     for filepath_in in file_list:
         # this is the bit that is slightly dodgy
-        filename_in = filepath_in.split('/')[2].split('.')[0]
+        filename_in = filepath_in.split('/')[1].split('.')[0]
 
         # load in audio clip and calculate mel spectrogram
         audio_mel = fsd_melspec(torchaudio.load(filepath_in)[0]).squeeze().T
@@ -503,7 +519,8 @@ def train(n_epochs, optimiser, model, loss_func, device,
           early_stopping_patience=10,
           log=None,
           verbose=True,
-          visdom=True):
+          visdom=False,
+          save_all_checkpoints=True):
 
     if visdom:
         vis = Visdom()
@@ -583,7 +600,7 @@ def train(n_epochs, optimiser, model, loss_func, device,
 
                     # save predictions for aggregation across whole clips
                     for i, output in enumerate(y_pred):
-                        clip_number = int(filepath[0].split('.')[0])
+                        clip_number = int(filepath[i].split('/')[-1].split('.')[0])
                         clip_index = np.where(
                             val_data.clip_order == clip_number)[0][0]
                         val_clip_scores[clip_index] += output
@@ -608,8 +625,9 @@ def train(n_epochs, optimiser, model, loss_func, device,
                         break
             val_loss_history.append(val_loss / len(val_dataloader))
 
-        checkpoint_path = checkpoints_dir +'epoch_' + str(epoch) + '.pt'
-        torch.save(model.state_dict(), checkpoint_path)
+        if save_all_checkpoints:
+            checkpoint_path = checkpoints_dir +'epoch_' + str(epoch) + '.pt'
+            torch.save(model.state_dict(), checkpoint_path)
 
         if val_dataloader:
             log_string = (
@@ -656,7 +674,7 @@ def model_eval(model, test_dataloader, test_data, device):
 
             # save predictions for aggregation across whole clips
             for i, output in enumerate(y_pred):
-                clip_number = int(filepath[i].split('/')[1].split('.')[0])
+                clip_number = int(filepath[i].split('/')[-1].split('.')[0])
                 clip_index = np.where(test_data.clip_order == clip_number)[0][0]
                 test_clip_scores[clip_index] += output
 
@@ -668,7 +686,7 @@ def model_eval(model, test_dataloader, test_data, device):
 
 
 def federated_train(model, device, loss_func, clients, rounds,
-                    C=0.2, B=64, E=4, lr=5e-04, lr_decay=0,
+                    C=0.2, B=64, E=4, lr=5e-04,
                     val_dataloader=None, val_data=None,
                     early_stopping_active=False,
                     best_epoch_path='checkpoints/best.pt',
@@ -680,7 +698,7 @@ def federated_train(model, device, loss_func, clients, rounds,
 # lr_decay = 0 # for now
     if early_stopping_active:
         early_stopping = EarlyStopping(
-            patience=10, verbose=True, path=best_epoch_path)
+            patience=20, verbose=True, path=best_epoch_path)
 
     glob_model = model.to(device)
 
@@ -713,7 +731,7 @@ def federated_train(model, device, loss_func, clients, rounds,
             optim = torch.optim.Adam(model.parameters(), lr=lr)
 
             if log: log.write("\nTraining {}'s model".format(key))
-            if verbose: print("\nTraining {}'s model".format(key))
+            if verbose: print("\nTraining {}'s model".format(key), end='')
 
             train(n_epochs=E,
                   optimiser=optim,
@@ -722,7 +740,8 @@ def federated_train(model, device, loss_func, clients, rounds,
                   device=device,
                   dataloader=dataloader,
                   early_stopping_active=False,
-                  plateau_catcher_active=False)
+                  plateau_catcher_active=False,
+                  save_all_checkpoints=False)
 
         # store old global model state
         prev_glob_model = copy.deepcopy(glob_model)

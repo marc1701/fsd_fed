@@ -38,18 +38,14 @@ def federated_train(config, subdir=None, checkpoint_dir='checkpoints'):
     B=64
     rounds=args.max_rounds
 
-    train_data = FSD50k_lmdbwrap(split='train', uploader_min=100, subdir=subdir)
-    train_dataloader = DataLoader(train_data, batch_size=64, num_workers=12)
+    train_data = FSD50k_MelSpec1s(split='train', subdir=subdir)
+    train_dataloader = DataLoader(train_data,
+        batch_size=64, num_workers=12, shuffle=True)
     print('Loaded Training Data')
 
-    val_data = FSD50k_lmdbwrap(split='val', subdir=subdir)
-    # set val data to only include uploaders from training data
-    uploader_intersect = np.intersect1d(
-        val_data.info.uploader.unique(), train_data.info.uploader.unique())
-    val_data.info = val_data.info[
-        val_data.info.uploader.isin(uploader_intersect)]
-    val_data._import_data()
-    val_dataloader = DataLoader(val_data, batch_size=64, num_workers=12)
+    val_data = FSD50k_MelSpec1s(split='val', subdir=subdir)
+    val_dataloader = DataLoader(val_data,
+        batch_size=64, num_workers=12, shuffle=True)
     print('Loaded Val Data')
 
     # make copies of training data and set for each individual uploader
@@ -116,7 +112,7 @@ def federated_train(config, subdir=None, checkpoint_dir='checkpoints'):
 
 
         print('\nEvaluating global model...')
-        auc_train = model_eval(glob_model, train_dataloader, train_data, device)
+        # auc_train = model_eval(glob_model, train_dataloader, train_data, device)
         auc_val = model_eval(glob_model, val_dataloader, val_data, device)
 
         print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
@@ -126,7 +122,7 @@ def federated_train(config, subdir=None, checkpoint_dir='checkpoints'):
             print(path)
             torch.save(glob_model.state_dict(), path)
 
-        tune.report(auc_train=auc_train, auc_val=auc_val)
+        tune.report(auc_val=auc_val)
 
 
 def model_eval(model, test_dataloader, test_data, device):
@@ -146,7 +142,7 @@ def model_eval(model, test_dataloader, test_data, device):
 
             # save predictions for aggregation across whole clips
             for i, output in enumerate(y_pred):
-                clip_number = int(filepath[0].split('.')[0])
+                clip_number = int(filepath[i].split('/')[-1].split('.')[0])
                 clip_index = np.where(test_data.clip_order == clip_number)[0][0]
                 test_clip_scores[clip_index] += output
 
@@ -162,13 +158,13 @@ def model_eval(model, test_dataloader, test_data, device):
 def main(cpus=1, gpus=1):
 
     config = {
-        'C'  : tune.grid_search([0.1, 0.3, 0.5, 0.7]),
-        'E'  : tune.grid_search([1, 3, 5, 7])
+        'C'  : tune.grid_search([0.5, 0.7]), #0.3!
+        'E'  : tune.grid_search([3, 5, 7])
     }
 
     reporter = CLIReporter(
         parameter_columns=['C', 'E'],
-        metric_columns=['auc_train', 'auc_val']
+        metric_columns=['auc_val']
     )
 
     result = tune.run(
