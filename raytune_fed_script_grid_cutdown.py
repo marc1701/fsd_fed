@@ -25,7 +25,7 @@ from functools import partial
 parser = argparse.ArgumentParser(
     description='Conducts and tunes federated learning on FSD50k dataset')
 parser.add_argument('--io_path', help='path of working directory')
-parser.add_argument('--max_rounds', nargs='?', default=50, type=int,
+parser.add_argument('--max_rounds', nargs='?', default=43, type=int,
                     help='maximum number of comms rounds')
 parser.add_argument('--gpus', nargs='?', default=1, type=int,
                     help='number of GPUs to use')
@@ -34,18 +34,18 @@ parser.add_argument('--cpus', nargs='?', default=1, type=int,
 args = parser.parse_args()
 
 
-def federated_train(config, subdir=None, checkpoint_dir='checkpoints'):
+def federated_train(config, subdir=None, checkpoint_dir='checkpoints', model_pt=None):
     B=64
     rounds=args.max_rounds
 
     train_data = FSD50k_MelSpec1s(split='train', subdir=subdir)
     train_dataloader = DataLoader(train_data,
-        batch_size=64, num_workers=12, shuffle=True)
+        batch_size=64, num_workers=1, shuffle=True)
     print('Loaded Training Data')
 
     val_data = FSD50k_MelSpec1s(split='val', subdir=subdir)
     val_dataloader = DataLoader(val_data,
-        batch_size=64, num_workers=12, shuffle=True)
+        batch_size=64, num_workers=1, shuffle=True)
     print('Loaded Val Data')
 
     # make copies of training data and set for each individual uploader
@@ -60,6 +60,8 @@ def federated_train(config, subdir=None, checkpoint_dir='checkpoints'):
     print(f"Training on {device}")
 
     glob_model = FSD_VGG().to(device) # random init 'global' model
+    if model_pt: # load previous model if provided
+        glob_model.load_state_dict(torch.load(model_pt))
     loss_func = nn.BCELoss()
 
     n_clients_to_select = round(config['C'] * len(clients))
@@ -74,7 +76,7 @@ def federated_train(config, subdir=None, checkpoint_dir='checkpoints'):
         this_rounds_data = dict()
         for client in this_rounds_clients:
             this_rounds_data[client.uploader] = [client,
-                DataLoader(client, batch_size=B, num_workers=12, shuffle=True),
+                DataLoader(client, batch_size=B, num_workers=1, shuffle=True),
                     copy.deepcopy(glob_model)]
 
         len_data = sum([len(client) for client in this_rounds_clients])
@@ -158,8 +160,8 @@ def model_eval(model, test_dataloader, test_data, device):
 def main(cpus=1, gpus=1):
 
     config = {
-        'C'  : tune.grid_search([0.5, 0.7]), #0.3!
-        'E'  : tune.grid_search([3, 5, 7])
+        'C'  : tune.grid_search([0.7]), #0.3! 0.5
+        'E'  : tune.grid_search([3])
     }
 
     reporter = CLIReporter(
@@ -168,7 +170,8 @@ def main(cpus=1, gpus=1):
     )
 
     result = tune.run(
-        partial(federated_train, subdir=args.io_path),
+        partial(federated_train, subdir=args.io_path,
+        model_pt='/home/marc1701/Desktop/federated-audio-fsd50k/fed_fsd/DEFAULT_4493d_00001_1_C=0.7,E=3_2021-04-22_05-22-05/checkpoint_6/checkpoint.pt'),
         resources_per_trial={'cpu': cpus, 'gpu': gpus},
         config=config,
         local_dir=args.io_path,

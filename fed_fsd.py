@@ -483,7 +483,7 @@ def segment_audio(file_list, out_dir, n_frames=101, n_overlap=50):
 
     for filepath_in in file_list:
         # this is the bit that is slightly dodgy
-        filename_in = filepath_in.split('/')[1].split('.')[0]
+        filename_in = filepath_in.split('/')[-1].split('.')[0]
 
         # load in audio clip and calculate mel spectrogram
         audio_mel = fsd_melspec(torchaudio.load(filepath_in)[0]).squeeze().T
