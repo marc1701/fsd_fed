@@ -160,8 +160,8 @@ def model_eval(model, test_dataloader, test_data, device):
 def main(cpus=1, gpus=1):
 
     config = {
-        'C'  : tune.grid_search([0.7]), #0.3! 0.5
-        'E'  : tune.grid_search([3])
+        'C'  : tune.grid_search([0.1, 0.3, 0.5, 0.7]), 
+        'E'  : tune.grid_search([1, 3, 5])
     }
 
     reporter = CLIReporter(
