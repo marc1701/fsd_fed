@@ -11,7 +11,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from pathlib import Path
 import pickle
 
-from visdom import Visdom
 from pytorchtools import EarlyStopping
 
 import seaborn as sns; sns.set()
@@ -19,7 +18,7 @@ from metrics_plots import *
 
 
 class FSD_CRNN(nn.Module):
-    '''implementation of baseline CRNN model described in FSD50k paper'''
+    '''implementation of baseline CRNN model described in FSD50K paper'''
 
     def __init__(self):
         super().__init__()
@@ -77,7 +76,7 @@ def count_parameters(model):
 
 
 class FSD_VGG(nn.Module):
-    '''implementation of VGG-like network described in FSD50k paper'''
+    '''implementation of VGG-like network described in FSD50K paper'''
 
     def __init__(self):
         super().__init__()
@@ -151,8 +150,8 @@ class FSD_VGG(nn.Module):
         return torch.sigmoid(x)
 
 
-class FSD50k_MelSpec1s(Dataset):
-    '''Dataset object to load FSD50k preprocessed into 1-second clips with
+class FSD50K_MelSpec1s(Dataset):
+    '''Dataset object to load FSD50K preprocessed into 1-second clips with
     96-band mel-spectrogram representation'''
 
     def __init__(self, transforms=None, split='train',
@@ -161,8 +160,7 @@ class FSD50k_MelSpec1s(Dataset):
                  subdir=None):
 
         self.transforms = transforms
-
-        self.data_path = 'FSD50k_' + split + '_1sec_segs/'
+        self.data_path = 'FSD50K_' + split + '_1sec_segs/'
 
         if subdir:
             self.data_path = os.path.join(subdir, self.data_path)
@@ -228,7 +226,6 @@ class FSD50k_MelSpec1s(Dataset):
         self.missing_classes = self.labels[self.class_clip_n == 0]
 
     def __getitem__(self, item):
-
         # load file
         filepath = self.file_list[item]
         x = torch.load(filepath)
@@ -244,7 +241,6 @@ class FSD50k_MelSpec1s(Dataset):
             x = self.transforms(x)
 
         return x.unsqueeze(0), y, filepath
-
 
     def display_class_contents(self, height=20, width=20):
         '''displays a bar chart showing number of clips per class in dataset'''
@@ -267,7 +263,7 @@ class FSD50k_MelSpec1s(Dataset):
                 tick.set_rotation(90)
 
 
-# transform as per spec in FSD50k paper
+# transform as per spec in FSD50K paper
 # paper states 30ms frames with 10ms overlap, output of shape
 # t*f = 101*96 - this works out at 660-sample frames with 220-sample
 # overlap, given fs = 22050 Hz
@@ -277,53 +273,9 @@ fsd_melspec = torch.nn.Sequential(
                                          n_fft=660, hop_length=220)
 )
 
-class FSD50k(Dataset):
-    '''Dataset object for FSD50K. This will load audio and labels
-    from the development set by default, from the eval set if dev is
-    set to False. Assumes default FSD50k directory names.'''
-
-    def __init__(self, transforms=fsd_melspec,
-                 anno_dir='FSD50K.ground_truth/',
-                 dev=True):
-
-        if dev: prefix = 'dev'
-        else: prefix = 'eval'
-
-        self.transforms = transforms
-
-        self.audio_path = 'FSD50K.' + prefix + '_audio/'
-
-        # read file list and annotations
-        self.info = pd.read_csv(anno_dir + prefix + '.csv')
-        self.vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
-
-        self.labels = vocab[1]
-        self.mids = vocab[2]
-
-    def __getitem__(self, item):
-
-        # set up array of zeros for binarised output
-        y = torch.zeros((len(vocab)), dtype=torch.bool)
-
-        # get m_ids from metadata as python list
-        tags = self.info.iloc[item]['mids'].split(',')
-
-        # binarised indication of tags
-        for tag in tags:
-            y[np.where(self.mids == tag)[0][0]] = True
-
-        # load associated audio file
-        filepath = self.audio_path + str(self.info.iloc[item]['fname']) + '.wav'
-        x = torchaudio.load(filepath)[0]
-
-        if self.transforms is not None:
-            x = self.transforms(x)
-
-        return x, y
-
-    def __len__(self): return len(self.info)
-
 def segment_audio(in_dir, out_dir, n_frames=101, n_overlap=50):
+    '''segment raw FSD50K audio into 1-second mel-spectrograms and
+    save these in PyTorch .pt format'''
 
     file_list = glob.glob(in_dir + '*')
 
@@ -358,8 +310,9 @@ def segment_audio(in_dir, out_dir, n_frames=101, n_overlap=50):
             # save the 1-second of frames to a file
             torch.save(data, filepath_out)
 
-def add_uploader_info(dataframe, json_info):
 
+def add_uploader_info(dataframe, json_info):
+    '''add a column to pandas metadata with uploader i.d. for each clip'''
     uploader_list = []
     dataframe = dataframe.loc[:]
 
@@ -373,7 +326,7 @@ def add_uploader_info(dataframe, json_info):
 
 
 def add_n_segs(dataframe, seg_dir):
-
+    '''add a column to pandas metadata with number of segments for each clip'''
     dataframe = dataframe.loc[:]
 
     clip_order = dataframe['fname'].to_numpy()
@@ -391,22 +344,14 @@ def train(n_epochs, optimiser, model, loss_func, device,
           dataloader, val_dataloader=None, val_data=None,
           best_epoch_path='checkpoints/best.pt',
           checkpoints_dir='checkpoints/',
-          early_stopping_active=True,
-          plateau_catcher_active=True,
+          early_stopping_active=False,
+          plateau_catcher_active=False,
           early_stopping_patience=10,
-          log=None,
           verbose=True,
-          visdom=False,
-          save_all_checkpoints=True):
-
-    if visdom:
-        vis = Visdom()
-        if val_dataloader:
-            vis.line([[0.,0.]], [0],
-                win='loss_plot', opts=dict(title='Loss', legend=['Train', 'Val']))
-        else:
-            vis.line([0.], [0],
-                win='loss_plot', opts=dict(title='Loss', legend=['Loss']))
+          save_all_checkpoints=False):
+    '''Train a model for set number of epochs. Will also calculate val
+    performance if val data is provided. EarlyStopping active by default
+    with a patience of 10 epochs'''
 
     # could definitely add kwargs for these
     if early_stopping_active:
@@ -456,50 +401,22 @@ def train(n_epochs, optimiser, model, loss_func, device,
         # !!! COULD VERY LIKELY SUBSTITUTE THIS FOR EVAL FUNC !!!
         if val_dataloader:
             # validation stage
-            model.eval()
+            val_clip_scores, _ = model_eval(
+                model, val_dataloader, val_data, device)
+            # calcuate pr-auc
+            val_pr_auc = pr_auc(
+                val_clip_scores, val_data.ground_truth.to(device))
 
-            val_clip_scores = torch.zeros(len(val_data.info), 200).to(device)
-            val_loss = 0.0
+            # if improvements plateau, reduce lr
+            if plateau_catcher_active: plateau_catcher.step(val_pr_auc)
 
-            with torch.no_grad():
-                for x, y_true, filepath in val_dataloader:
-
-                    # send data to GPU if available
-                    x = x.to(device); y_true = y_true.to(device)
-
-                    # get predictions
-                    y_pred = model(x)
-
-                    # calculate losses
-                    loss = loss_func(y_pred, y_true)
-
-                    val_loss += loss.item()
-
-                    # save predictions for aggregation across whole clips
-                    for i, output in enumerate(y_pred):
-                        clip_number = int(filepath[i].split('/')[-1].split('.')[0])
-                        clip_index = np.where(
-                            val_data.clip_order == clip_number)[0][0]
-                        val_clip_scores[clip_index] += output
-
-                # divide scores by number of segments per clip
-                # (averaging across segments)
-                val_clip_scores /= val_data.n_segs.to(device)
-
-                # calcuate pr-auc
-                val_pr_auc = pr_auc(
-                    val_clip_scores, val_data.ground_truth.to(device))
-
-                # if improvements plateau, reduce lr
-                if plateau_catcher_active: plateau_catcher.step(val_pr_auc)
-
-                # early stopping
-                # negative metric as expects loss to decrease
-                if early_stopping_active:
-                    early_stopping(-val_pr_auc, model)
-                    if early_stopping.early_stop:
-                        if verbose: print('Early stopping')
-                        break
+            # early stopping
+            # negative metric as expects loss to decrease
+            if early_stopping_active:
+                early_stopping(-val_pr_auc, model)
+                if early_stopping.early_stop:
+                    if verbose: print('Early stopping')
+                    break
             val_loss_history.append(val_loss / len(val_dataloader))
 
         if save_all_checkpoints:
@@ -513,28 +430,20 @@ def train(n_epochs, optimiser, model, loss_func, device,
                 train_loss / len(dataloader),
                 val_loss / len(val_dataloader),
                 val_pr_auc))
-            if visdom:
-                vis.line(
-                [[train_loss / len(dataloader), val_loss / len(val_dataloader)]],
-                    [epoch-1], win='loss_plot', update='append')
         else:
             log_string = (
                 '\n{} Epoch {}, Train loss {}'.format(
                 datetime.datetime.now(), epoch,
                 train_loss / len(dataloader)))
-            if visdom:
-                vis.line(
-                [train_loss / len(dataloader)], [epoch-1],
-                    win='loss_plot', update='append')
 
-        if log: log.write(log_string)
         if verbose: print(log_string, end=" ")
 
-    # one will have to manually close log file after using this function
     return model, loss_history, val_loss_history
 
 
 def model_eval(model, test_dataloader, test_data, device):
+    '''evaluate the performance of a trained model - automatically aggregates
+    scores for segments across a whole clip'''
 
     model.eval()
     # initialise output aggregation array
@@ -559,7 +468,8 @@ def model_eval(model, test_dataloader, test_data, device):
         # (averaging across segments)
         test_clip_scores /= test_data.n_segs.to(device)
 
-    return test_clip_scores.cpu(), test_data.ground_truth # (i.e. y_pred, y_true)
+    return test_clip_scores.to(device), test_data.ground_truth
+    # i.e. y_pred, y_true
 
 
 def federated_train(model, device, loss_func, clients, rounds,
@@ -567,12 +477,9 @@ def federated_train(model, device, loss_func, clients, rounds,
                     val_dataloader=None, val_data=None,
                     early_stopping_active=False,
                     best_epoch_path='checkpoints/best.pt',
-                    log=None, verbose=True):
-# C = 0.2 # fraction of clients to select for training (1/5th)
-# B = 64 # local minibatch size
-# E = 4 # local epochs - keeping this low - best benchmark was E=4
-# lr = 5e-4 # same as FSD benchmark
-# lr_decay = 0 # for now
+                    verbose=True):
+    '''train a central model using federated learning'''
+
     if early_stopping_active:
         early_stopping = EarlyStopping(
             patience=20, verbose=True, path=best_epoch_path)
@@ -586,7 +493,6 @@ def federated_train(model, device, loss_func, clients, rounds,
     val_loss_history = []
 
     for i in range(rounds):
-        if log: log.write('Round ' + str(i+1))
         if verbose: print('Round ' + str(i+1))
 
         # randomly select clients for this round
@@ -604,10 +510,8 @@ def federated_train(model, device, loss_func, clients, rounds,
 
             client, dataloader, model = item
             # optim must get the client model parameters
-            # ? weight decay
             optim = torch.optim.Adam(model.parameters(), lr=lr)
 
-            if log: log.write("\nTraining {}'s model".format(key))
             if verbose: print("\nTraining {}'s model".format(key), end='')
 
             train(n_epochs=E,
@@ -615,10 +519,7 @@ def federated_train(model, device, loss_func, clients, rounds,
                   model=model,
                   loss_func=loss_func,
                   device=device,
-                  dataloader=dataloader,
-                  early_stopping_active=False,
-                  plateau_catcher_active=False,
-                  save_all_checkpoints=False)
+                  dataloader=dataloader)
 
         # store old global model state
         prev_glob_model = copy.deepcopy(glob_model)
@@ -628,8 +529,8 @@ def federated_train(model, device, loss_func, clients, rounds,
 
         # total weight for previous global model
         untrained_weight = 1
-        # add weighted weights (ha) from this round's local models
-#         print('\nMerging model weights...')
+
+        # add weighted parameters from this round's local models
         for key, item in this_rounds_data.items():
 
             client, _, client_model = item
@@ -652,14 +553,13 @@ def federated_train(model, device, loss_func, clients, rounds,
 
             val_loss_history.append(auc_val)
 
-            if log: log.write('\nGlobal Val PR-AUC: {:.4f}'.format(float(auc_val)))
-            if verbose: print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
+            if verbose:
+                print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
 
             if early_stopping_active:
                 early_stopping(-auc_val, glob_model)
                 if early_stopping.early_stop:
                     if verbose: print('Early stopping')
-#                     break
                     return torch.load(best_epoch_path), val_loss_history
 
     return torch.load(best_epoch_path), np.array(val_loss_history)
@@ -671,7 +571,6 @@ def fed_weight_update(model_a, model_b, weight):
             params_a.data += weight * params_b.data
 
 def zero_model_params(model):
-
     device = torch.device('cuda') if next(
         model.parameters()).is_cuda else torch.device('cpu')
     with torch.no_grad():
