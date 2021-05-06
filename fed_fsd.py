@@ -8,7 +8,6 @@ import random
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from Databases import *
 from pathlib import Path
 import pickle
 
@@ -324,162 +323,11 @@ class FSD50k(Dataset):
 
     def __len__(self): return len(self.info)
 
-# G. Rochette (gitlab.eps.surrey.ac.uk/gr00311/Databases/-/blob/master/database.py)
-class Database(object):
-    def __init__(self, path: Path):
-        path = str(path)
-        self.db = lmdb.open(
-            path=path,
-            readonly=True,
-            readahead=False,
-            max_spare_txns=128,
-            lock=False,
-        )
-        with self.db.begin() as txn:
-            keys = pickle.loads(txn.get(key=pickle.dumps("keys")))
-        self.keys = set(keys)
+def segment_audio(in_dir, out_dir, n_frames=101, n_overlap=50):
 
-    def __iter__(self):
-        return iter(self.keys)
+    file_list = glob.glob(in_dir + '*')
 
-    def __len__(self):
-        return len(self.keys)
-
-    def __getitem__(self, item):
-        key = pickle.dumps(item)
-        with self.db.begin() as txn:
-            value = txn.get(key=key)
-        return value
-
-    def __del__(self):
-        self.db.close()
-
-
-class MelDatabase(Database):
-    def __init__(self, path: Path):
-        super(MelDatabase, self).__init__(path=path)
-
-    def __getitem__(self, item):
-        key = pickle.dumps(item)
-        with self.db.begin() as txn:
-            value = txn.get(key=key)
-            tensor = torch.load(io.BytesIO(value))
-        return tensor
-
-
-class FSD50k_lmdbwrap(Dataset):
-
-    def __init__(self, transforms=None, split='test',
-                 uploader_min=0, uploader_name=None, subdir=None,
-                 anno_dir='FSD50K.ground_truth/', annotations='all'):
-
-        lmdb_path = 'lmdb_data/FSD50k_' + split + '_1sec_segs/'
-        if subdir:
-            lmdb_path = os.path.join(subdir, lmdb_path)
-            anno_dir = os.path.join(subdir, anno_dir)
-
-        self.annotations = annotations
-        vocab = pd.read_csv(anno_dir + 'vocabulary.csv', header=None)
-        self.labels = vocab[1]
-        self.mids = vocab[2]
-        self.len_vocab = len(vocab)
-
-        # load relevant lmdb database
-        self.lmdb_data = MelDatabase(lmdb_path)
-        self.info = pd.read_csv(anno_dir + split + '.csv')
-        if uploader_min: # if user has set a value for minimum clips
-            uploaders = (
-                self.info.uploader.value_counts() >= uploader_min).to_dict()
-            uploaders = [name for name in uploaders.keys() if uploaders[name]]
-            # remove all uploaders that do not meet the minimum clip threshold
-            self.info = self.info[self.info.uploader.isin(uploaders)]
-
-        # in case user sets single uploader
-        self._full_info = self.info
-        # list of available uploaders
-        self.all_uploaders = self._full_info.uploader.unique()
-
-        # if user has specified an uploader, set it here
-        if uploader_name: self.set_uploader(uploader_name)
-        else: self._import_data()
-
-        self._import_data()
-
-    def _import_data(self):
-        # this method of making a file list should work
-        # regardless of whether full set or subset is used
-#         self.file_list = list(self.lmdb_data.keys)
-        self.file_list = []
-        for fname in self.info.fname:
-            n_segs = int(self.info[self.info.fname==fname].n_segs)
-
-            for n in range(n_segs):
-                filepath = str(fname) + '.' + str(n)
-                self.file_list.append(filepath)
-
-        # order of clips in tensor
-        self.clip_order = torch.tensor(self.info['fname'].to_numpy())
-        # number of segments in tensor
-        self.n_segs = torch.tensor(
-            self.info['n_segs'].to_numpy()).unsqueeze(1)
-
-        # set up ground truth array
-        self.ground_truth = torch.zeros(len(self.info), self.len_vocab)
-        for i, clip_number in enumerate(self.clip_order):
-            if self.annotations == 'all':
-                tags = self.info.iloc[i]['mids'].split(',')
-            elif self.annotations == 'single':
-                tags = self.info.iloc[i]['single_labels'].split(',')
-            for tag in tags:
-                tag_idx = np.where(self.mids == tag)[0][0]
-                self.ground_truth[i, tag_idx] = 1
-
-        # other useful properties
-        self.class_clip_n = self.ground_truth.sum(0).numpy()
-        self.missing_classes = self.labels[self.class_clip_n == 0]
-
-    def __len__(self): return self.info.n_segs.sum()
-
-    def set_uploader(self, uploader_name):
-        self.info = self._full_info[self._full_info.uploader == uploader_name]
-        self.uploader = uploader_name
-        self._import_data()
-
-    def __getitem__(self, item):
-
-        filepath = self.file_list[item]
-        x = self.lmdb_data[filepath]
-
-        # find index of original audio clip from filename
-        clip_index = int(filepath.split('/')[-1].split('.')[0])
-        csv_index = np.where(self.clip_order == clip_index)[0][0]
-
-        y = self.ground_truth[csv_index]
-
-        return x.unsqueeze(0), y, filepath
-
-    def display_class_contents(self, height=20, width=20):
-        '''displays a bar chart showing number of clips per class in dataset'''
-        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4)
-        fig.set_figheight(20)
-        fig.set_figwidth(20)
-
-        # need to edit this so it detects order of magnitude
-        # upper_ylim = round(int(torch.max(self.ground_truth.sum(0))), -3)
-
-        for n, ax in enumerate((ax1, ax2, ax3, ax4)):
-
-            l, u = n*50, n*50 + 50
-
-            # ax.set_ylim(0, upper_ylim)
-            ax.bar(self.labels[l:u], self.class_clip_n[l:u])
-
-            for tick in ax.get_xticklabels():
-                # still not ideal visually
-                tick.set_rotation(90)
-
-
-def segment_audio(file_list, out_dir, n_frames=101, n_overlap=50):
+    if not os.path.exists(out_dir): os.mkdir(out_dir)
 
     for filepath_in in file_list:
         # this is the bit that is slightly dodgy
@@ -501,14 +349,43 @@ def segment_audio(file_list, out_dir, n_frames=101, n_overlap=50):
             filename_out = filename_in + '.' + str(i) + '.pt'
             filepath_out = out_dir + filename_out
 
+            data = audio_mel[i * n_overlap: i * n_overlap + n_frames]
+
+            # fix missing final frames
+            if data.shape != torch.Size([101, 96]):
+                data = torch.cat((data, data[-1].unsqueeze(0)))
+
             # save the 1-second of frames to a file
-            torch.save(audio_mel[i * n_overlap: i * n_overlap + n_frames],
-                filepath_out)
+            torch.save(data, filepath_out)
 
-# calculate how many extra frames are needed for exact split
-# n_extra_frames = n_frames - len(audio_mel) % n_frames
+def add_uploader_info(dataframe, json_info):
 
-# audio_mel = torch.cat((audio_mel, audio_mel[:n_extra_frames]), 0)
+    uploader_list = []
+    dataframe = dataframe.loc[:]
+
+    for fname in dataframe.fname:
+        uploader = json_info[json_info.index == fname].uploader.to_numpy()[0]
+        uploader_list.append(uploader)
+
+    dataframe['uploader'] = uploader_list
+
+    return dataframe
+
+
+def add_n_segs(dataframe, seg_dir):
+
+    dataframe = dataframe.loc[:]
+
+    clip_order = dataframe['fname'].to_numpy()
+
+    segs = glob.glob(seg_dir + '*')
+    numsegs = np.array([sum('/' + str(clip_number) + '.' in filepath
+                                     for filepath in segs)
+                                     for clip_number in clip_order])
+    dataframe['n_segs'] = numsegs
+
+    return dataframe
+
 
 def train(n_epochs, optimiser, model, loss_func, device,
           dataloader, val_dataloader=None, val_data=None,
