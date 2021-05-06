@@ -150,7 +150,10 @@ class FSD_VGG(nn.Module):
 
 class FSD50K_MelSpec1s(Dataset):
     '''Dataset object to load FSD50K preprocessed into 1-second clips with
-    96-band mel-spectrogram representation'''
+    96-band mel-spectrogram representation. Use uploader_min parameter
+    to set a minimum number of clips required for uploaders to be included.
+    Use uploader_name paramater to return an object with the data from
+    only the named uploader.'''
 
     def __init__(self, transforms=None, split='train',
                  uploader_min=0, uploader_name=None,
