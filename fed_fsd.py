@@ -3,12 +3,10 @@ import matplotlib.pyplot as plt
 import os, glob, datetime, io
 import torch, torchaudio
 import copy
-import lmdb
 import random
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from pathlib import Path
 import pickle
 
 from pytorchtools import EarlyStopping
@@ -398,7 +396,6 @@ def train(n_epochs, optimiser, model, loss_func, device,
 
         loss_history.append(train_loss / len(dataloader))
 
-        # !!! COULD VERY LIKELY SUBSTITUTE THIS FOR EVAL FUNC !!!
         if val_dataloader:
             # validation stage
             val_clip_scores, _ = model_eval(
@@ -475,14 +472,9 @@ def model_eval(model, test_dataloader, test_data, device):
 def federated_train(model, device, loss_func, clients, rounds,
                     C=0.2, B=64, E=4, lr=5e-04,
                     val_dataloader=None, val_data=None,
-                    early_stopping_active=False,
                     best_epoch_path='checkpoints/best.pt',
                     verbose=True):
     '''train a central model using federated learning'''
-
-    if early_stopping_active:
-        early_stopping = EarlyStopping(
-            patience=20, verbose=True, path=best_epoch_path)
 
     glob_model = model.to(device)
 
@@ -492,8 +484,8 @@ def federated_train(model, device, loss_func, clients, rounds,
 
     val_loss_history = []
 
-    for i in range(rounds):
-        if verbose: print('Round ' + str(i+1))
+    for comms_round in range(rounds):
+        print('Round ' + str(comms_round+1))
 
         # randomly select clients for this round
         this_rounds_clients = random.sample(clients, n_clients_to_select)
@@ -502,33 +494,30 @@ def federated_train(model, device, loss_func, clients, rounds,
         this_rounds_data = dict()
         for client in this_rounds_clients:
             this_rounds_data[client.uploader] = [client,
-                DataLoader(client, batch_size=B, num_workers=12, shuffle=True),
+                DataLoader(client, batch_size=B, num_workers=1, shuffle=True),
                     copy.deepcopy(glob_model)]
+
+        len_data = sum([len(client) for client in this_rounds_clients])
 
         # train client models
         for key, item in this_rounds_data.items():
 
             client, dataloader, model = item
             # optim must get the client model parameters
-            optim = torch.optim.Adam(model.parameters(), lr=lr)
+            # ? weight decay
+            optim = torch.optim.Adam(model.parameters(), lr=5e-4)
 
-            if verbose: print("\nTraining {}'s model".format(key), end='')
+            print("\nTraining {}'s model".format(key), end='')
 
-            train(n_epochs=E,
+            train(n_epochs=config['E'],
                   optimiser=optim,
                   model=model,
                   loss_func=loss_func,
                   device=device,
                   dataloader=dataloader)
 
-        # store old global model state
-        prev_glob_model = copy.deepcopy(glob_model)
-
         # zero out global model parameters
         zero_model_params(glob_model)
-
-        # total weight for previous global model
-        untrained_weight = 1
 
         # add weighted parameters from this round's local models
         for key, item in this_rounds_data.items():
@@ -538,29 +527,11 @@ def federated_train(model, device, loss_func, clients, rounds,
 
             fed_weight_update(glob_model, client_model, client_weight)
 
-            untrained_weight -= client_weight
 
-        # add previous model weights back in
-        # (representing the local models not trained this time around)
-        # (this behaviour should be alterable after Nilsson)
-        fed_weight_update(glob_model, prev_glob_model, untrained_weight)
+        print('\nEvaluating global model...')
+        auc_val = model_eval(glob_model, val_dataloader, val_data, device)
 
-        if val_data:
-            if verbose: print('\nEvaluating global model...')
-            y_pred_val, y_true_val = model_eval(
-                glob_model, val_dataloader, val_data, device)
-            auc_val = pr_auc(y_pred_val, y_true_val)
-
-            val_loss_history.append(auc_val)
-
-            if verbose:
-                print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
-
-            if early_stopping_active:
-                early_stopping(-auc_val, glob_model)
-                if early_stopping.early_stop:
-                    if verbose: print('Early stopping')
-                    return torch.load(best_epoch_path), val_loss_history
+        print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
 
     return torch.load(best_epoch_path), np.array(val_loss_history)
 

@@ -96,10 +96,7 @@ def federated_train(config, subdir=None, checkpoint_dir='checkpoints', model_pt=
                   model=model,
                   loss_func=loss_func,
                   device=device,
-                  dataloader=dataloader,
-                  early_stopping_active=False,
-                  plateau_catcher_active=False,
-                  save_all_checkpoints=False)
+                  dataloader=dataloader)
 
         # zero out global model parameters
         zero_model_params(glob_model)
@@ -160,7 +157,7 @@ def model_eval(model, test_dataloader, test_data, device):
 def main(cpus=1, gpus=1):
 
     config = {
-        'C'  : tune.grid_search([0.1, 0.3, 0.5, 0.7]), 
+        'C'  : tune.grid_search([0.1, 0.3, 0.5, 0.7]),
         'E'  : tune.grid_search([1, 3, 5])
     }
 
@@ -171,7 +168,6 @@ def main(cpus=1, gpus=1):
 
     result = tune.run(
         partial(federated_train, subdir=args.io_path,
-        model_pt='/home/marc1701/Desktop/federated-audio-fsd50k/fed_fsd/DEFAULT_4493d_00001_1_C=0.7,E=3_2021-04-22_05-22-05/checkpoint_6/checkpoint.pt'),
         resources_per_trial={'cpu': cpus, 'gpu': gpus},
         config=config,
         local_dir=args.io_path,
