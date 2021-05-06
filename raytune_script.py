@@ -34,7 +34,11 @@ parser.add_argument('--cpus', nargs='?', default=1, type=int,
 args = parser.parse_args()
 
 
-def federated_train(config, subdir=None, checkpoint_dir='checkpoints', model_pt=None):
+def federated_train(config,
+    subdir=None, checkpoint_dir='checkpoints', model_pt=None):
+    '''modified version of this function from fed_fsd.py
+    for compatibility with ray.tune'''
+
     B=64
     rounds=args.max_rounds
 
@@ -111,7 +115,6 @@ def federated_train(config, subdir=None, checkpoint_dir='checkpoints', model_pt=
 
 
         print('\nEvaluating global model...')
-        # auc_train = model_eval(glob_model, train_dataloader, train_data, device)
         auc_val = model_eval(glob_model, val_dataloader, val_data, device)
 
         print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
