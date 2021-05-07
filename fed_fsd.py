@@ -473,11 +473,15 @@ def model_eval(model, test_dataloader, test_data, device):
 
 
 def federated_train(model, device, loss_func, clients, rounds,
+                    val_dataloader, val_data,
                     C=0.2, B=64, E=4, lr=5e-04,
-                    val_dataloader=None, val_data=None,
                     best_epoch_path='checkpoints/best.pt',
                     verbose=True):
     '''train a central model using federated learning'''
+
+    # used to save best epoch, will not do early stopping
+    early_stopping = EarlyStopping(
+            patience=rounds, verbose=True, path=best_epoch_path)
 
     glob_model = model.to(device)
 
@@ -532,7 +536,14 @@ def federated_train(model, device, loss_func, clients, rounds,
 
 
         print('\nEvaluating global model...')
-        auc_val = model_eval(glob_model, val_dataloader, val_data, device)
+        val_clip_scores, val_truth = model_eval(
+            glob_model, val_dataloader, val_data, device)
+        # calcuate pr-auc
+        auc_val = pr_auc(val_clip_scores, val_truth)
+
+        # this saves parameters if AUC has improved
+        early_stopping(-auc_val, glob_model)
+
 
         print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
 
