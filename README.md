@@ -34,7 +34,7 @@ Tested using Python 3.6.12 on Ubuntu 20.10
 
 #### Usage:
 To recreate the results reported in M. C. Green & M. D. Plumbley (2021),
-_Federated Learning With Highly Imbalanced Audio Data_, submitted for
+[_Federated Learning With Highly Imbalanced Audio Data_](https://arxiv.org/abs/2105.08550), submitted for
 publication, simply run `fsd_segment_setup.py` in the FSD50K home directory, followed by `raytune_script.py`.
 
 ### Key Functions and Classes:
