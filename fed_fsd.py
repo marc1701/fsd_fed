@@ -280,9 +280,17 @@ def segment_audio(in_dir, out_dir, n_frames=101, n_overlap=50):
 
     file_list = glob.glob(in_dir + '*')
 
-    if not os.path.exists(out_dir): os.mkdir(out_dir)
+    if not os.path.exists(out_dir):
+        os.mkdir(out_dir)
 
-    for filepath_in in file_list:
+    len_file_list = len(file_list)
+    for i, filepath_in in enumerate(file_list, 1):
+        print(f"[{i}/{len_file_list}] creating mel:", filepath_in)
+
+        if os.path.exists(filepath_in):
+            print("  already exists! skipping...")
+            continue
+
         # this is the bit that is slightly dodgy
         filename_in = filepath_in.split('/')[-1].split('.')[0]
 
@@ -310,6 +318,7 @@ def segment_audio(in_dir, out_dir, n_frames=101, n_overlap=50):
 
             # save the 1-second of frames to a file
             torch.save(data, filepath_out)
+            print("  saved to", filepath_out)
 
 
 def add_uploader_info(dataframe, json_info):
