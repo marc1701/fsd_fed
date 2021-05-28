@@ -42,10 +42,10 @@ OUT_VAL = os.path.join(FSD50K_PATH, 'FSD50K_val_1sec_segs', '')
 OUT_TEST = os.path.join(FSD50K_PATH, 'FSD50K_test_1sec_segs', '')
 
 
-# # segment the audio into t*f = 101 * 96
-# print('Creating mel spectrograms...')
-# segment_audio(FSD50K_DEV, OUT_DEV)
-# segment_audio(FSD50K_TEST, OUT_TEST)
+# segment the audio into t*f = 101 * 96
+print('Creating mel spectrograms...')
+segment_audio(FSD50K_DEV, OUT_DEV)
+segment_audio(FSD50K_TEST, OUT_TEST)
 
 # reformatting of csv info files
 dev_info = pd.read_csv(os.path.join(FSD50K_GT, 'dev.csv'))
@@ -63,25 +63,23 @@ if not os.path.exists(val_dir):
 
 len_val_info = len(val_info)
 
-# for i, fname in enumerate(val_info.fname, 1):
-#     print(f'[{i}/{len_val_info}] train/val split processing:', fname)
-#     fname = str(fname)
-#     segs = glob.glob(OUT_DEV + fname + '*')
-#     try:
-#         assert segs, f'{OUT_DEV + fname + "*"} should point to existing files!'
-#     except:
-#         print("\n\n\nDUPLICATE?? CHECK IF SAME BEGIN IN OTHER PRIOR FILE", fname)
-#         # breakpoint()
-#     for seg in segs:
-#         out_path = os.path.join(OUT_VAL, os.path.basename(seg))
-#         # os.rename(seg, out_path)
-#         # print('  moved', seg, 'to', out_path)
-#         if os.path.exists(out_path):
-#             print('  already exists in', out_path, "removing from", seg)
-#             os.remove(seg)
-#         else:
-#             os.rename(seg, out_path)
-#             print('  moved', seg, 'to', out_path)
+for i, fname in enumerate(val_info.fname, 1):
+    print(f'[{i}/{len_val_info}] train/val split processing:', fname)
+    fname = str(fname)
+    segs = glob.glob(OUT_DEV + fname + '*')
+    try:
+        assert segs, f'{OUT_DEV + fname + "*"} should point to existing files!'
+    except:
+        print("\n\n\nDUPLICATE? CHECK IF SAME BEGIN IN OTHER PRIOR FILE", fname)
+
+    for seg in segs:
+        out_path = os.path.join(OUT_VAL, os.path.basename(seg))
+        if os.path.exists(out_path):
+            print('  already exists in', out_path, "removing from", seg)
+            os.remove(seg)
+        else:
+            os.rename(seg, out_path)
+            print('  moved', seg, 'to', out_path)
 
 
 # load json files with uploader information and add to the info dataframes
