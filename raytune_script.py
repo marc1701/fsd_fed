@@ -24,7 +24,9 @@ from functools import partial
 # command line arguments
 parser = argparse.ArgumentParser(
     description='Conducts and tunes federated learning on FSD50k dataset')
-parser.add_argument('--io_path', help='path of working directory')
+parser.add_argument('-p', '--fsd50k_path', required=True,
+                    help='Path to the FSD50K dataset')
+parser.add_argument('--out_path', help='path of working directory')
 parser.add_argument('--max_rounds', nargs='?', default=43, type=int,
                     help='maximum number of comms rounds')
 parser.add_argument('--gpus', nargs='?', default=1, type=int,
@@ -35,21 +37,22 @@ args = parser.parse_args()
 
 
 def federated_train(config,
-    subdir=None, checkpoint_dir='checkpoints', model_pt=None):
+                    subdir=None, checkpoint_dir='checkpoints', model_pt=None,
+                    batch_size=64, C_fixme=0.2):
     '''modified version of this function from fed_fsd.py
     for compatibility with ray.tune'''
 
-    B=64
+    B = batch_size
     rounds=args.max_rounds
 
-    train_data = FSD50k_MelSpec1s(split='train', subdir=subdir)
+    train_data = FSD50K_MelSpec1s(split='train', subdir=subdir)
     train_dataloader = DataLoader(train_data,
-        batch_size=64, num_workers=1, shuffle=True)
+        batch_size=B, num_workers=1, shuffle=True)
     print('Loaded Training Data')
 
-    val_data = FSD50k_MelSpec1s(split='val', subdir=subdir)
+    val_data = FSD50K_MelSpec1s(split='val', subdir=subdir)
     val_dataloader = DataLoader(val_data,
-        batch_size=64, num_workers=1, shuffle=True)
+        batch_size=B, num_workers=1, shuffle=True)
     print('Loaded Val Data')
 
     # make copies of training data and set for each individual uploader
@@ -68,7 +71,10 @@ def federated_train(config,
         glob_model.load_state_dict(torch.load(model_pt))
     loss_func = nn.BCELoss()
 
-    n_clients_to_select = round(config['C'] * len(clients))
+
+
+    # n_clients_to_select = round(config['C'] * len(clients))
+    n_clients_to_select = round(C_fixme * len(clients))
 
     for comms_round in range(rounds):
         print('Round ' + str(comms_round+1))
@@ -76,17 +82,33 @@ def federated_train(config,
         # randomly select clients for this round
         this_rounds_clients = random.sample(clients, n_clients_to_select)
 
+
+
+
         # set up dict with dataloaders and models for each client
         this_rounds_data = dict()
         for client in this_rounds_clients:
-            this_rounds_data[client.uploader] = [client,
-                DataLoader(client, batch_size=B, num_workers=1, shuffle=True),
+            try:
+                this_rounds_data[client.uploader] = [
+                    client,
+                    DataLoader(client, batch_size=B, num_workers=1, shuffle=True),
                     copy.deepcopy(glob_model)]
+            except ValueError as ve:
+                print("!!!!!!!", ve)
+
+
+
+
+
+                import pdb; pdb.set_trace()
 
         len_data = sum([len(client) for client in this_rounds_clients])
 
         # train client models
         for key, item in this_rounds_data.items():
+
+
+
 
             client, dataloader, model = item
             # optim must get the client model parameters
@@ -94,6 +116,10 @@ def federated_train(config,
             optim = torch.optim.Adam(model.parameters(), lr=5e-4)
 
             print("\nTraining {}'s model".format(key), end='')
+
+
+            import pdb; pdb.set_trace()
+
 
             train(n_epochs=config['E'],
                   optimiser=optim,
@@ -107,12 +133,9 @@ def federated_train(config,
 
         # add weighted parameters from this round's local models
         for key, item in this_rounds_data.items():
-
             client, _, client_model = item
             client_weight = len(client) / len_data
-
             fed_weight_update(glob_model, client_model, client_weight)
-
 
         print('\nEvaluating global model...')
         auc_val = model_eval(glob_model, val_dataloader, val_data, device)
@@ -169,11 +192,19 @@ def main(cpus=1, gpus=1):
         metric_columns=['auc_val']
     )
 
+
+
+    federated_train(
+        config, subdir=args.fsd50k_path,
+        checkpoint_dir='checkpoints', model_pt=None)
+
+    import pdb; pdb.set_trace()
+
     result = tune.run(
-        partial(federated_train, subdir=args.io_path,
+        partial(federated_train, subdir=args.fsd50k_path),
         resources_per_trial={'cpu': cpus, 'gpu': gpus},
         config=config,
-        local_dir=args.io_path,
+        local_dir=args.out_path,
         name='fed_fsd',
         progress_reporter=reporter)
 

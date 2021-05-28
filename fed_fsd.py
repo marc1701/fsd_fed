@@ -8,7 +8,7 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import pickle
-
+from collections import defaultdict
 from pytorchtools import EarlyStopping
 
 import seaborn as sns; sns.set()
@@ -162,7 +162,7 @@ class FSD50K_MelSpec1s(Dataset):
 
         self.transforms = transforms
         self.data_path = 'FSD50K_' + split + '_1sec_segs/'
-
+        anno_dir = os.path.join(anno_dir, "")  # make sure it has trailing /
         if subdir:
             self.data_path = os.path.join(subdir, self.data_path)
             anno_dir = os.path.join(subdir, anno_dir)
@@ -190,7 +190,8 @@ class FSD50K_MelSpec1s(Dataset):
         if uploader_name: self.set_uploader(uploader_name)
         else: self._import_data()
 
-    def __len__(self): return self.info.n_segs.sum()
+    def __len__(self):
+        return self.info.n_segs.sum()
 
     def set_uploader(self, uploader_name):
         self.info = self._full_info[self._full_info.uploader == uploader_name]
@@ -283,12 +284,13 @@ def segment_audio(in_dir, out_dir, n_frames=101, n_overlap=50):
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
 
+    out_codes = set(f.split(".")[0] for f in os.listdir(out_dir))
     len_file_list = len(file_list)
     for i, filepath_in in enumerate(file_list, 1):
         print(f"[{i}/{len_file_list}] creating mel:", filepath_in)
-
-        if os.path.exists(filepath_in):
-            print("  already exists! skipping...")
+        in_code = os.path.splitext(os.path.basename(filepath_in))[0]
+        if in_code in out_codes:
+            print(" ", in_code, "already exists! skipping...")
             continue
 
         # this is the bit that is slightly dodgy
@@ -342,9 +344,15 @@ def add_n_segs(dataframe, seg_dir):
     clip_order = dataframe['fname'].to_numpy()
 
     segs = glob.glob(seg_dir + '*')
-    numsegs = np.array([sum('/' + str(clip_number) + '.' in filepath
-                                     for filepath in segs)
-                                     for clip_number in clip_order])
+
+    # to count how many segments we have per ID, use a dictionary. Defaultdict
+    # assumes 0 as default for all possible keys, so we just +1 every segment
+    numsegs_d = defaultdict(int)
+    len_segs = len(segs)
+    for i, filepath in enumerate(segs, 1):
+        file_id = int(os.path.basename(filepath).split(".")[0])
+        numsegs_d[file_id] += 1
+    numsegs = np.array([numsegs_d[clip_number] for clip_number in clip_order])
     dataframe['n_segs'] = numsegs
 
     return dataframe
