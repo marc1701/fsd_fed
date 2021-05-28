@@ -26,25 +26,26 @@ parser = argparse.ArgumentParser(
     description='Conducts and tunes federated learning on FSD50k dataset')
 parser.add_argument('-p', '--fsd50k_path', required=True,
                     help='Path to the FSD50K dataset')
-parser.add_argument('--out_path', help='path of working directory')
+parser.add_argument('-o', '--out_path', required=True,
+                    help='path of working directory')
 parser.add_argument('--max_rounds', nargs='?', default=43, type=int,
                     help='maximum number of comms rounds')
-parser.add_argument('--gpus', nargs='?', default=1, type=int,
-                    help='number of GPUs to use')
-parser.add_argument('--cpus', nargs='?', default=1, type=int,
-                    help='number of CPUs to use')
+# parser.add_argument('--gpus', nargs='?', default=1, type=int,
+#                     help='number of GPUs to use')
+# parser.add_argument('--cpus', nargs='?', default=1, type=int,
+#                     help='number of CPUs to use')
 args = parser.parse_args()
 
 
 def federated_train(config,
                     subdir=None, checkpoint_dir='checkpoints', model_pt=None,
-                    train_batch_size=64, eval_batch_size=300,
-                    C_fixme=0.1, E_fixme=5):
+                    train_batch_size=64, eval_batch_size=300):
     '''modified version of this function from fed_fsd.py
     for compatibility with ray.tune'''
-
+    # wait for GPU. see: https://docs.ray.io/en/master/tune/user-guide.html
+    tune.util.wait_for_gpu()
+    #
     rounds=args.max_rounds
-
     train_data = FSD50K_MelSpec1s(split='train', subdir=subdir)
     train_dataloader = DataLoader(train_data,
         batch_size=train_batch_size, num_workers=1, shuffle=True)
@@ -73,8 +74,8 @@ def federated_train(config,
 
 
 
-    # n_clients_to_select = round(config['C'] * len(clients))
-    n_clients_to_select = round(C_fixme * len(clients))
+    n_clients_to_select = round(config['C'] * len(clients))
+    # n_clients_to_select = round(C_fixme * len(clients))
 
     for comms_round in range(rounds):
         print("Round", comms_round + 1, "of", rounds)
@@ -100,8 +101,8 @@ def federated_train(config,
             optim = torch.optim.Adam(model.parameters(), lr=5e-4)
             print(f"\n[{client_i}/{n_clients_to_select}] Training {key}'s",
                   "model", end="")
-            train(  # n_epochs=config['E'],
-                  n_epochs=E_fixme,
+            train(n_epochs=config['E'],
+                  # n_epochs=E_fixme,
                   optimiser=optim,
                   model=model,
                   loss_func=loss_func,
@@ -160,34 +161,28 @@ def ray_model_eval(model, test_dataloader, test_data, device):
 
     return auc_val
 
-def main(cpus=1, gpus=1):
-
+def main():
+    """
+    """
     config = {
         'C'  : tune.grid_search([0.1, 0.3, 0.5, 0.7]),
         'E'  : tune.grid_search([1, 3, 5])
     }
+    # config = {
+    #     "C": tune.grid_search([0.01]),
+    #     "E": tune.grid_search([1]),
+    # }
 
     reporter = CLIReporter(
         parameter_columns=['C', 'E'],
         metric_columns=['auc_val']
     )
 
-
-
-    federated_train(
-        config, subdir=args.fsd50k_path,
-        C_fixme=0.01,
-        E_fixme=1,
-        checkpoint_dir='checkpoints', model_pt=None)
-
-    import pdb; pdb.set_trace()
-
     result = tune.run(
         partial(federated_train,
-                C_fixme=0.01,
-                E_fixme=1,
                 subdir=args.fsd50k_path),
-        resources_per_trial={'cpu': cpus, 'gpu': gpus},
+        # resources_per_trial={'cpu': cpus, 'gpu': gpus},
+        resources_per_trial={'cpu': 1, 'gpu': 1},
         config=config,
         local_dir=args.out_path,
         name='fed_fsd',
@@ -195,10 +190,11 @@ def main(cpus=1, gpus=1):
 
     return result
 
-result = main(cpus=args.cpus, gpus=args.gpus)
+# result = main(cpus=args.cpus, gpus=args.gpus)
+result = main()
 
 # write output dataframe to file
-filepath = os.path.join(args.io_path, 'hpt_result.pkl')
+filepath = os.path.join(args.out_path, 'hpt_result.pkl')
 file_to_write = open(filepath, 'wb')
 pickle.dump(result.dataframe(), file_to_write)
 file_to_write.close()
