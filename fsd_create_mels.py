@@ -66,11 +66,15 @@ len_val_info = len(val_info)
 for i, fname in enumerate(val_info.fname, 1):
     print(f'[{i}/{len_val_info}] train/val split processing:', fname)
     fname = str(fname)
-    segs = glob.glob(OUT_DEV + fname + '*')
-    try:
-        assert segs, f'{OUT_DEV + fname + "*"} should point to existing files!'
-    except:
-        print("\n\n\nDUPLICATE? CHECK IF SAME BEGIN IN OTHER PRIOR FILE", fname)
+    segs = glob.glob(f"{os.path.join(OUT_DEV, fname)}.*.pt")
+    # segs = glob.glob(OUT_DEV + fname + '*')
+
+    assert segs, f'{OUT_DEV + fname + "*"} should point to existing files!'
+    # import pdb; pdb.set_trace()
+    # try:
+    #     assert segs, f'{OUT_DEV + fname + "*"} should point to existing files!'
+    # except:
+    #     print("\n\n\nDUPLICATE? CHECK IF SAME BEGIN IN OTHER PRIOR FILE", fname)
 
     for seg in segs:
         out_path = os.path.join(OUT_VAL, os.path.basename(seg))

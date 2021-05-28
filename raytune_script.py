@@ -38,21 +38,21 @@ args = parser.parse_args()
 
 def federated_train(config,
                     subdir=None, checkpoint_dir='checkpoints', model_pt=None,
-                    batch_size=64, C_fixme=0.2):
+                    train_batch_size=64, eval_batch_size=300,
+                    C_fixme=0.1, E_fixme=5):
     '''modified version of this function from fed_fsd.py
     for compatibility with ray.tune'''
 
-    B = batch_size
     rounds=args.max_rounds
 
     train_data = FSD50K_MelSpec1s(split='train', subdir=subdir)
     train_dataloader = DataLoader(train_data,
-        batch_size=B, num_workers=1, shuffle=True)
+        batch_size=train_batch_size, num_workers=1, shuffle=True)
     print('Loaded Training Data')
 
     val_data = FSD50K_MelSpec1s(split='val', subdir=subdir)
     val_dataloader = DataLoader(val_data,
-        batch_size=B, num_workers=1, shuffle=True)
+        batch_size=eval_batch_size, num_workers=1, shuffle=True)
     print('Loaded Val Data')
 
     # make copies of training data and set for each individual uploader
@@ -77,51 +77,31 @@ def federated_train(config,
     n_clients_to_select = round(C_fixme * len(clients))
 
     for comms_round in range(rounds):
-        print('Round ' + str(comms_round+1))
+        print("Round", comms_round + 1, "of", rounds)
 
         # randomly select clients for this round
         this_rounds_clients = random.sample(clients, n_clients_to_select)
 
-
-
-
         # set up dict with dataloaders and models for each client
         this_rounds_data = dict()
         for client in this_rounds_clients:
-            try:
-                this_rounds_data[client.uploader] = [
-                    client,
-                    DataLoader(client, batch_size=B, num_workers=1, shuffle=True),
-                    copy.deepcopy(glob_model)]
-            except ValueError as ve:
-                print("!!!!!!!", ve)
-
-
-
-
-
-                import pdb; pdb.set_trace()
-
+            this_rounds_data[client.uploader] = [
+                client,
+                DataLoader(client, batch_size=train_batch_size, num_workers=1,
+                           shuffle=True),
+                copy.deepcopy(glob_model)]
         len_data = sum([len(client) for client in this_rounds_clients])
 
         # train client models
-        for key, item in this_rounds_data.items():
-
-
-
-
+        for client_i, (key, item) in enumerate(this_rounds_data.items(), 1):
             client, dataloader, model = item
             # optim must get the client model parameters
             # ? weight decay
             optim = torch.optim.Adam(model.parameters(), lr=5e-4)
-
-            print("\nTraining {}'s model".format(key), end='')
-
-
-            import pdb; pdb.set_trace()
-
-
-            train(n_epochs=config['E'],
+            print(f"\n[{client_i}/{n_clients_to_select}] Training {key}'s",
+                  "model", end="")
+            train(  # n_epochs=config['E'],
+                  n_epochs=E_fixme,
                   optimiser=optim,
                   model=model,
                   loss_func=loss_func,
@@ -138,7 +118,7 @@ def federated_train(config,
             fed_weight_update(glob_model, client_model, client_weight)
 
         print('\nEvaluating global model...')
-        auc_val = model_eval(glob_model, val_dataloader, val_data, device)
+        auc_val = ray_model_eval(glob_model, val_dataloader, val_data, device)
 
         print('\nGlobal Val PR-AUC: {:.4f}\n'.format(float(auc_val)))
 
@@ -146,19 +126,19 @@ def federated_train(config,
             path = os.path.join(checkpoint_dir, "checkpoint.pt")
             print(path)
             torch.save(glob_model.state_dict(), path)
-
         tune.report(auc_val=auc_val)
 
 
-def model_eval(model, test_dataloader, test_data, device):
+def ray_model_eval(model, test_dataloader, test_data, device):
 
     model.eval()
     # initialise output aggregation array
     test_clip_scores = torch.zeros(len(test_data.info), 200).to(device)
 
     with torch.no_grad():
-        for x, y_true, filepath in test_dataloader:
-
+        num_eval_iters = len(test_dataloader)
+        for test_i, (x, y_true, filepath) in enumerate(test_dataloader, 1):
+            print(f" eval round [{test_i}/{num_eval_iters}]")
             # send data to GPU if available
             x = x.to(device); y_true = y_true.to(device)
 
@@ -196,12 +176,17 @@ def main(cpus=1, gpus=1):
 
     federated_train(
         config, subdir=args.fsd50k_path,
+        C_fixme=0.01,
+        E_fixme=1,
         checkpoint_dir='checkpoints', model_pt=None)
 
     import pdb; pdb.set_trace()
 
     result = tune.run(
-        partial(federated_train, subdir=args.fsd50k_path),
+        partial(federated_train,
+                C_fixme=0.01,
+                E_fixme=1,
+                subdir=args.fsd50k_path),
         resources_per_trial={'cpu': cpus, 'gpu': gpus},
         config=config,
         local_dir=args.out_path,

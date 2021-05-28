@@ -467,14 +467,13 @@ def model_eval(model, test_dataloader, test_data, device):
     test_clip_scores = torch.zeros(len(test_data.info), 200).to(device)
 
     with torch.no_grad():
-        for x, y_true, filepath in test_dataloader:
-
+        num_eval_iters = len(test_dataloader)
+        for test_i, (x, y_true, filepath) in enumerate(test_dataloader, 1):
+            print(f" eval round [{test_i}/num_eval_iters]")
             # send data to GPU if available
             x = x.to(device); y_true = y_true.to(device)
-
             # get predictions
             y_pred = model(x)
-
             # save predictions for aggregation across whole clips
             for i, output in enumerate(y_pred):
                 clip_number = int(filepath[i].split('/')[-1].split('.')[0])
