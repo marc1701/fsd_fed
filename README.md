@@ -52,7 +52,7 @@ The resulting environment has been frozen into `requirements.txt`. Check the fil
 #### Dataset:
 
 
-This repository requires the installation of the [FSD50K dataset](https://zenodo.org/record/4060432). The dataset should be downloaded following the official layout. Given a root `<FSD50K_PATH>`, (e.g. `./datasets/fsd50k`), the following steps should achieve taht:
+This repository requires the installation of the [FSD50K dataset](https://zenodo.org/record/4060432). The dataset should be downloaded following the official layout. Given a root `<FSD50K_PATH>`, (e.g. `./datasets/fsd50k`), the following steps should achieve that:
 
 ```
 # mkdir and cd to e.g. ./datasets/fsd50k
