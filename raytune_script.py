@@ -30,10 +30,6 @@ parser.add_argument('-o', '--out_path', required=True,
                     help='path of working directory')
 parser.add_argument('--max_rounds', nargs='?', default=43, type=int,
                     help='maximum number of comms rounds')
-# parser.add_argument('--gpus', nargs='?', default=1, type=int,
-#                     help='number of GPUs to use')
-# parser.add_argument('--cpus', nargs='?', default=1, type=int,
-#                     help='number of CPUs to use')
 args = parser.parse_args()
 
 
@@ -42,8 +38,9 @@ def federated_train(config,
                     train_batch_size=64, eval_batch_size=300):
     '''modified version of this function from fed_fsd.py
     for compatibility with ray.tune'''
-    # wait for GPU. see: https://docs.ray.io/en/master/tune/user-guide.html
-    tune.util.wait_for_gpu()
+    # # wait for GPU. see: https://docs.ray.io/en/master/tune/user-guide.html
+    # this crashes since not implemented yet.
+    # tune.util.wait_for_gpu()
     #
     rounds=args.max_rounds
     train_data = FSD50K_MelSpec1s(split='train', subdir=subdir)
@@ -72,10 +69,7 @@ def federated_train(config,
         glob_model.load_state_dict(torch.load(model_pt))
     loss_func = nn.BCELoss()
 
-
-
     n_clients_to_select = round(config['C'] * len(clients))
-    # n_clients_to_select = round(C_fixme * len(clients))
 
     for comms_round in range(rounds):
         print("Round", comms_round + 1, "of", rounds)
@@ -102,7 +96,6 @@ def federated_train(config,
             print(f"\n[{client_i}/{n_clients_to_select}] Training {key}'s",
                   "model", end="")
             train(n_epochs=config['E'],
-                  # n_epochs=E_fixme,
                   optimiser=optim,
                   model=model,
                   loss_func=loss_func,
@@ -168,10 +161,6 @@ def main():
         'C'  : tune.grid_search([0.1, 0.3, 0.5, 0.7]),
         'E'  : tune.grid_search([1, 3, 5])
     }
-    # config = {
-    #     "C": tune.grid_search([0.01]),
-    #     "E": tune.grid_search([1]),
-    # }
 
     reporter = CLIReporter(
         parameter_columns=['C', 'E'],
@@ -181,7 +170,6 @@ def main():
     result = tune.run(
         partial(federated_train,
                 subdir=args.fsd50k_path),
-        # resources_per_trial={'cpu': cpus, 'gpu': gpus},
         resources_per_trial={'cpu': 1, 'gpu': 1},
         config=config,
         local_dir=args.out_path,
@@ -190,7 +178,6 @@ def main():
 
     return result
 
-# result = main(cpus=args.cpus, gpus=args.gpus)
 result = main()
 
 # write output dataframe to file

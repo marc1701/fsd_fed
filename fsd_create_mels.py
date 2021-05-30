@@ -67,14 +67,7 @@ for i, fname in enumerate(val_info.fname, 1):
     print(f'[{i}/{len_val_info}] train/val split processing:', fname)
     fname = str(fname)
     segs = glob.glob(f"{os.path.join(OUT_DEV, fname)}.*.pt")
-    # segs = glob.glob(OUT_DEV + fname + '*')
-
     assert segs, f'{OUT_DEV + fname + "*"} should point to existing files!'
-    # import pdb; pdb.set_trace()
-    # try:
-    #     assert segs, f'{OUT_DEV + fname + "*"} should point to existing files!'
-    # except:
-    #     print("\n\n\nDUPLICATE? CHECK IF SAME BEGIN IN OTHER PRIOR FILE", fname)
 
     for seg in segs:
         out_path = os.path.join(OUT_VAL, os.path.basename(seg))
@@ -104,9 +97,6 @@ val_info = add_n_segs(val_info, OUT_VAL)
 test_info = add_n_segs(test_info, OUT_TEST)
 
 # save final reworked csv info files
-# train_info.iloc[:,:-1].to_csv(os.path.join(FSD50K_GT, 'train.csv'), index=False)
-# val_info.iloc[:,:-1].to_csv(os.path.join(FSD50K_GT, 'val.csv'), index=False)
-# test_info.iloc[:,:-1].to_csv(os.path.join(FSD50K_GT, 'test.csv'), index=False)
 train_info.to_csv(os.path.join(FSD50K_GT, 'train.csv'), index=False)
 val_info.to_csv(os.path.join(FSD50K_GT, 'val.csv'), index=False)
 test_info.iloc[:,:-1].to_csv(os.path.join(FSD50K_GT, 'test.csv'), index=False)
