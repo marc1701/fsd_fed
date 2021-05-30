@@ -16,7 +16,7 @@ segments per original clip.
 - Functions to train models using FL.
 - Script utilising `ray[tune]` to perform a grid search of FL parameters.
 
-#### Requirements:
+#### Dependencies:
 - Python 3.6 or later
 - Python modules:
   - [numpy](http://www.numpy.org/)
@@ -30,12 +30,84 @@ segments per original clip.
   - [pytorch_lightning](https://www.pytorchlightning.ai/)
   - [ray](https://docs.ray.io/en/latest/tune/)
 
-Tested using Python 3.6.12 on Ubuntu 20.10
+Tested using Python 3.6.12 on Ubuntu 20.10. From a fresh virtual environment on a CUDA-enabled Linux system, the following installation order should work:
+
+
+```
+conda create --name flfsd50k python=3.6
+conda activate flfsd50k
+conda install pytorch torchvision torchaudio cudatoolkit=11.1 -c pytorch -c conda-forge
+conda install pandas
+conda install -c anaconda scipy
+conda install -c conda-forge scikit-learn
+conda install -c conda-forge pytorch-lightning
+conda install -c anaconda seaborn
+pip install ray
+conda install -c conda-forge libsndfile
+```
+
+The resulting environment has been frozen into `requirements.txt`. Check the file for a full detail on versions and dependencies.
+
+
+#### Dataset:
+
+
+This repository requires the installation of the [FSD50K dataset](https://zenodo.org/record/4060432). The dataset should be downloaded following the official layout. Given a root `<FSD50K_PATH>`, (e.g. `./datasets/fsd50k`), the following steps should achieve taht:
+
+```
+# mkdir and cd to e.g. ./datasets/fsd50k
+
+# download, merge, uncompress and cleanup dev data
+wget https://zenodo.org/record/4060432/files/FSD50K.dev_audio.z01?download=1
+wget https://zenodo.org/record/4060432/files/FSD50K.dev_audio.z02?download=1
+wget https://zenodo.org/record/4060432/files/FSD50K.dev_audio.z03?download=1
+wget https://zenodo.org/record/4060432/files/FSD50K.dev_audio.z04?download=1
+wget https://zenodo.org/record/4060432/files/FSD50K.dev_audio.z05?download=1
+wget https://zenodo.org/record/4060432/files/FSD50K.dev_audio.zip?download=1
+for i in ./*download=1; do mv -v $i "${i/?download=1/}"; done
+zip -s 0 FSD50K.dev_audio.zip --out unsplit.zip
+unzip unsplit.zip  # this will uncompress the data into a folder with wav files
+rm FSD50K.dev_audio.z*
+rm unsplit.zip
+
+# download, merge and uncompress eval data
+wget https://zenodo.org/record/4060432/files/FSD50K.eval_audio.z01?download=1
+wget https://zenodo.org/record/4060432/files/FSD50K.eval_audio.zip?download=1
+for i in ./*download=1; do mv -v $i "${i/?download=1/}"; done
+zip -s 0 FSD50K.eval_audio.zip --out unsplit.zip
+unzip unsplit.zip  # this will uncompress the data into a folder with wav files
+rm FSD50K.eval_audio.z*
+rm unsplit.zip
+
+# download and uncompress smaller files
+wget https://zenodo.org/record/4060432/files/FSD50K.doc.zip?download=1
+wget https://zenodo.org/record/4060432/files/FSD50K.ground_truth.zip?download=1
+wget https://zenodo.org/record/4060432/files/FSD50K.metadata.zip?download=1
+for i in ./*download=1; do mv -v $i "${i/?download=1/}"; done
+for i in FSD50K.*.zip; do unzip $i; done  # this will uncompress the zip files into folders
+for i in FSD50K.*.zip; do rm $i; done
+
+# At this point we should be left with the filestructure as in https://zenodo.org/record/4060432
+```
+
 
 #### Usage:
 To recreate the results reported in M. C. Green & M. D. Plumbley (2021),
 [_Federated Learning With Highly Imbalanced Audio Data_](https://arxiv.org/abs/2105.08550), submitted for
-publication, simply run `fsd_segment_setup.py` in the FSD50K home directory, followed by `raytune_script.py`.
+publication, follow these steps (make sure all dependencies and the dataset are installed):
+
+```
+git clone https://github.com/marc1701/fsd_fed.git
+cd fsd_fed
+
+# Convert raw audio files into mel spectrograms. This may need a few hours and about
+# 450GB of your disk
+python fsd_create_mels.py -p <FSD50K_PATH>
+
+# Perform a grid search on the FL setup as per paper
+python raytune_script.py -p <FSD50K_PATH> -o <DATA_OUTPUT>
+```
+
 
 ### Key Functions and Classes:
 ###  `FSD50K_MelSpec1s`
@@ -100,7 +172,8 @@ Both need to be specified in order for patch-level predictions to be correctly a
 
 Use of `raytune_script.py` to conduct federated learning experiments is
 recommended as `ray[tune]` will take care of saving model parameters at
-every round and saving progress reports.
+every round and saving progress reports, as well as parallelizing the grid
+search across multiple GPUs, if desired.
 
 [1]:https://zenodo.org/record/4060432
 [2]:https://arxiv.org/abs/2010.00475
